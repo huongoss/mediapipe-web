@@ -1,0 +1,188 @@
+.physics-game-demo {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  height: 100vh;
+  width: 100vw;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.controls {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  background: rgba(245, 245, 245, 0.95);
+  padding: 15px;
+  border-radius: 8px;
+  z-index: 100;
+  max-width: 400px;
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.controls h2 {
+  margin: 0 0 10px 0;
+  color: #333;
+  font-size: 18px;
+}
+
+.status {
+  display: flex;
+  gap: 15px;
+  margin-bottom: 10px;
+  font-weight: 500;
+  flex-wrap: wrap;
+}
+
+.status span {
+  padding: 3px 8px;
+  background: rgba(224, 224, 224, 0.8);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.buttons button {
+  padding: 8px 15px;
+  background: #007bff;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background-color 0.2s;
+}
+
+.buttons button:hover {
+  background: #0056b3;
+}
+
+.buttons button:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+.video-overlay {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: 100;
+  border: 2px solid #007bff;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #000;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.video-overlay video {
+  display: block;
+  width: 200px;
+  height: 150px;
+  object-fit: cover;
+}
+
+.canvas-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100vw !important;
+  height: 100vh !important;
+  border: none !important;
+  background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+}
+
+.instructions {
+  position: absolute;
+  bottom: 20px;
+  left: 20px;
+  background: rgba(248, 249, 250, 0.95);
+  padding: 15px;
+  border-radius: 8px;
+  border-left: 4px solid #007bff;
+  max-width: 500px;
+  max-height: 300px;
+  overflow-y: auto;
+  z-index: 100;
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.instructions h3 {
+  margin-top: 0;
+  color: #333;
+  font-size: 16px;
+}
+
+.instructions ul {
+  margin: 8px 0;
+  padding-left: 16px;
+}
+
+.instructions li {
+  margin-bottom: 6px;
+  line-height: 1.4;
+  font-size: 13px;
+}
+
+.instructions strong {
+  color: #007bff;
+}
+
+/* Toggle button for instructions */
+.instructions-toggle {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  background: rgba(0, 123, 255, 0.9);
+  color: white;
+  border: none;
+  border-radius: 50%;
+  width: 50px;
+  height: 50px;
+  cursor: pointer;
+  font-size: 18px;
+  z-index: 101;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(10px);
+}
+
+.instructions-toggle:hover {
+  background: rgba(0, 86, 179, 0.9);
+}
+
+.instructions.hidden {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .controls {
+    max-width: 300px;
+    padding: 10px;
+  }
+  
+  .status {
+    flex-direction: column;
+    gap: 8px;
+  }
+  
+  .buttons {
+    flex-direction: column;
+  }
+  
+  .video-overlay video {
+    width: 150px;
+    height: 112px;
+  }
+  
+  .instructions {
+    max-width: 90vw;
+    max-height: 200px;
+    padding: 10px;
+  }
+}
