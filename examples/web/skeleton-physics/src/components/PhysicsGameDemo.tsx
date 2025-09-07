@@ -2,7 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { SkeletonProvider } from '../providers/SkeletonProvider';
 import { ThreeSkeletonRenderer } from '../renderers/ThreeSkeletonRenderer';
-import { SkeletonPhysicsSystem } from '../utils/SkeletonPhysicsSystem';
+import { PhysicsSystem } from '../physics/PhysicsSystem';
+import { SkeletonPhysicsAdapter } from '../physics/SkeletonPhysicsAdapter';
+import { FocusManager, type PausableComponent } from '../utils/FocusManager';
 
 interface PhysicsGameDemoProps {
   modelPath: string;
@@ -15,20 +17,39 @@ interface PhysicsGameDemoProps {
 export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasContainerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const skeletonProviderRef = useRef<SkeletonProvider | null>(null);
   const rendererRef = useRef<ThreeSkeletonRenderer | null>(null);
-  const physicsSystemRef = useRef<SkeletonPhysicsSystem | null>(null);
+  const physicsSystemRef = useRef<PhysicsSystem | null>(null);
+  const skeletonPhysicsRef = useRef<SkeletonPhysicsAdapter | null>(null);
   const gameObjectsRef = useRef<Array<{ rigidBody: any; mesh: THREE.Mesh }>>([]);
   
-  const [isInitialized, setIsInitialized] = useState(false);
-  const [isTracking, setIsTracking] = useState(false);
   const [gameMode, setGameMode] = useState<'visualization' | 'physics'>('visualization');
   const [score, setScore] = useState(0);
   const [showInstructions, setShowInstructions] = useState(true);
+  const [systemsReady, setSystemsReady] = useState(false);
+  const [isDetectionActive, setIsDetectionActive] = useState(false);
+  const [showSkeletonOverlay, setShowSkeletonOverlay] = useState(false);
+  const skeletonOverlayRef = useRef<any>(null);
+  const focusManagerRef = useRef<FocusManager | null>(null);
+
+  // Create pausable wrappers for all components
+  const pausableComponents = useRef<PausableComponent[]>([]);
 
   useEffect(() => {
+    if(!canvasRef.current) return;
     initializeDemo();
-    return () => cleanup();
+    
+    // Initialize focus manager
+    focusManagerRef.current = FocusManager.getInstance();
+    
+    return () => {
+      cleanup();
+      // Unregister all pausable components
+      pausableComponents.current.forEach(component => {
+        focusManagerRef.current?.unregister(component);
+      });
+    };
   }, []);
 
   const initializeDemo = async () => {
@@ -48,26 +69,44 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
       skeletonProviderRef.current = skeletonProvider;
       console.log('✅ Skeleton provider initialized');
 
+      // Create pausable wrapper for skeleton provider
+      const pausableProvider: PausableComponent = {
+        pause: () => skeletonProvider.pause(),
+        resume: () => skeletonProvider.resume()
+      };
+      pausableComponents.current.push(pausableProvider);
+      focusManagerRef.current?.register(pausableProvider);
+
       // Initialize renderer
-      if (canvasContainerRef.current) {
-        console.log('🎨 Creating Three.js renderer...');
-        
-        // Clear any existing canvas elements first
-        canvasContainerRef.current.innerHTML = '';
-        
-        const renderer = new ThreeSkeletonRenderer(canvasContainerRef.current, {
-          jointSize: 0.03,
-          boneThickness: 0.015,
-          jointColor: '#ff6b6b',
-          boneColor: '#4ecdc4',
-          showJointLabels: false
+      if (canvasRef.current) {
+        console.log('🎨 Setting up Three.js renderer...');
+        // Set up renderer with physics mode enabled
+        const renderer = new ThreeSkeletonRenderer(
+          canvasRef.current, {
+          showJointLabels: false,
+          physicsMode: gameMode === 'physics', // Enable physics mode visualization
+          physicsJointColor: '#ffaa00', // Orange color for physics joints
+          physicsJointSize: 0.08 // Large collision spheres
         });
         rendererRef.current = renderer;
         console.log('✅ Three.js renderer created');
 
+        // Create pausable wrapper for renderer
+        const pausableRenderer: PausableComponent = {
+          pause: () => renderer.pause(),
+          resume: () => renderer.resume()
+        };
+        pausableComponents.current.push(pausableRenderer);
+        focusManagerRef.current?.register(pausableRenderer);
+
         console.log('⚙️ Initializing physics system...');
-        // Initialize physics system
-        const physicsSystem = new SkeletonPhysicsSystem({
+        // Initialize new modular physics system
+        const physicsSystem = new PhysicsSystem();
+        await physicsSystem.initialize();
+        physicsSystemRef.current = physicsSystem;
+        
+        // Create skeleton physics adapter
+        const skeletonPhysics = new SkeletonPhysicsAdapter(physicsSystem, {
           jointMass: 0.1,
           jointRadius: 0.03,
           boneStiffness: 500.0,
@@ -75,42 +114,14 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
           enableCollisions: true,
           gravityScale: 0.5
         });
-        physicsSystemRef.current = physicsSystem;
-        console.log('✅ Physics system initialized');
+        skeletonPhysicsRef.current = skeletonPhysics;
+        console.log('✅ Physics system and skeleton adapter initialized');
 
         console.log('🔗 Setting up skeleton update subscription...');
         // Subscribe to skeleton updates
         skeletonProvider.subscribe((skeletonData) => {
-          console.log('📨 Received skeleton update:', skeletonData ? 'Data available' : 'No data');
-          
-          if (gameMode === 'visualization') {
-            console.log('👀 Updating visualization mode');
-            renderer.updateSkeleton(skeletonData);
-          } else {
-            console.log('🎯 Updating physics mode');
-            // In physics mode, update physics system and render physics positions
-            physicsSystem.updateSkeleton(skeletonData);
-            physicsSystem.step();
-            
-            // Get physics positions and create visualization
-            const physicsPositions = physicsSystem.getPhysicsJointPositions();
-            if (skeletonData && physicsPositions.size > 0) {
-              console.log('🔄 Applying physics positions to skeleton');
-              // Create a modified skeleton data with physics positions
-              const physicsSkeletonData = {
-                ...skeletonData,
-                joints: skeletonData.joints.map(joint => ({
-                  ...joint,
-                  worldPosition: physicsPositions.get(joint.id) ? {
-                    x: physicsPositions.get(joint.id)!.x,
-                    y: physicsPositions.get(joint.id)!.y,
-                    z: physicsPositions.get(joint.id)!.z
-                  } : joint.worldPosition
-                }))
-              };
-              renderer.updateSkeleton(physicsSkeletonData);
-            }
-          }
+          // Always update renderer with latest skeleton. Physics system doesn't own skeleton.
+          renderer.updateSkeleton(skeletonData);
         });
         console.log('✅ Skeleton subscription set up');
 
@@ -122,7 +133,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
         // Add some interactive game objects
         createGameObjects();
         
-        setIsInitialized(true);
+        setSystemsReady(true);
         console.log('🎉 Demo initialization complete!');
       } else {
         console.error('❌ Canvas container not found');
@@ -155,7 +166,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
         {
           video: {
             width: { ideal: 3840, min: 1920 },
-            height: { ideal: 2160, min: 1080 },
+          height: { ideal: 2160, min: 1080 },
             frameRate: { ideal: 30, min: 15 },
             facingMode: 'user',
             aspectRatio: { ideal: 16/9 }
@@ -274,6 +285,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
           // Retry with minimal constraints
           try {
             const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            const video = videoRef.current;
             video.srcObject = stream;
             await video.play();
             console.log('✅ Camera setup successful with fallback settings');
@@ -286,10 +298,10 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
   };
 
   const createGameObjects = () => {
-    if (!rendererRef.current || !physicsSystemRef.current) return;
+    if (!rendererRef.current || !skeletonPhysicsRef.current) return;
 
     const scene = rendererRef.current.getScene();
-    const physicsSystem = physicsSystemRef.current;
+    const skeletonPhysics = skeletonPhysicsRef.current;
 
     console.log('🎮 Creating more reachable game objects...');
 
@@ -306,30 +318,33 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
         Math.sin(angle) * radius * 0.5 // Z: closer to camera (shallower depth)
       );
 
-      console.log(`🎯 Ball ${i} position:`, position);
+      console.log(`🎯 Ball ${i} initial position:`, { x: position.x.toFixed(3), y: position.y.toFixed(3), z: position.z.toFixed(3) });
 
       // Create visual representation - make balls slightly larger and more colorful
       const geometry = new THREE.SphereGeometry(0.08, 16, 12);
       const hue = i / 8; // Different color for each ball
-      const material = new THREE.MeshLambertMaterial({ 
+      const material = new THREE.MeshBasicMaterial({ 
         color: new THREE.Color().setHSL(hue, 0.8, 0.6),
-        emissive: new THREE.Color().setHSL(hue, 0.3, 0.1) // Slight glow
       });
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.copy(position);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
       scene.add(mesh);
 
       // Create physics body with appropriate size
-      const { rigidBody } = physicsSystem.addPhysicsObject(
-        position,
-        'sphere',
-        new THREE.Vector3(0.08, 0, 0), // Slightly larger radius
-        0.2 // Heavier for better physics interaction
-      );
+      try {
+        const { rigidBody } = skeletonPhysics.addPhysicsObject(
+          position,
+          'sphere',
+          new THREE.Vector3(0.08, 0, 0), // Slightly larger radius
+          0.02 // Heavier for better physics interaction
+        );
 
-      gameObjectsRef.current.push({ rigidBody, mesh });
+        console.log(`✅ Ball ${i} physics body created successfully`);
+        gameObjectsRef.current.push({ rigidBody, mesh });
+
+      } catch (error) {
+        console.error(`❌ Failed to create physics body for ball ${i}:`, error);
+      }
     }
 
     // Add a few floating balls at different heights for variety
@@ -353,78 +368,61 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
       mesh.castShadow = true;
       scene.add(mesh);
 
-      const { rigidBody } = physicsSystem.addPhysicsObject(
-        position,
-        'sphere',
-        new THREE.Vector3(0.06, 0, 0),
-        0.1 // Lighter for easy hitting
-      );
+      try {
+        const { rigidBody } = skeletonPhysics.addPhysicsObject(
+          position,
+          'sphere',
+          new THREE.Vector3(0.06, 0, 0),
+          0.1 // Lighter for easy hitting
+        );
 
-      gameObjectsRef.current.push({ rigidBody, mesh });
+        gameObjectsRef.current.push({ rigidBody, mesh });
+        console.log(`✅ Floating ball ${i} physics body created`);
+      } catch (error) {
+        console.error(`❌ Failed to create floating ball ${i}:`, error);
+      }
     }
 
     console.log(`✅ Created ${gameObjectsRef.current.length} game objects total`);
 
-    // Start game object sync loop
-    syncGameObjects();
   };
 
-  const syncGameObjects = () => {
-    if (!physicsSystemRef.current) return;
+  const startTracking = async () => {
+    if (!videoRef.current || !skeletonProviderRef.current) return;
 
-    // Sync visual objects with physics
-    gameObjectsRef.current.forEach(({ rigidBody, mesh }) => {
-      const pos = rigidBody.translation();
-      const rot = rigidBody.rotation();
-      
-      mesh.position.set(pos.x, pos.y, pos.z);
-      mesh.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+    try {
+      // Setup camera
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: 'user'
+        }
+      });
 
-      // Check if ball fell off the screen (simple scoring)
-      if (pos.y < -2) {
-        setScore(prev => prev + 1);
-        // Reset ball position
-        rigidBody.setTranslation({ x: (Math.random() - 0.5) * 2, y: 2, z: 0 }, true);
-        rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
-      }
-    });
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
 
-    requestAnimationFrame(syncGameObjects);
-  };
-
-  const startTracking = () => {
-    if (skeletonProviderRef.current && videoRef.current) {
+      // Start skeleton detection
       skeletonProviderRef.current.startLiveDetection(videoRef.current);
-      setIsTracking(true);
+      setIsDetectionActive(true);
+      setSystemsReady(true);
+      
+      console.log('✅ Tracking started');
+    } catch (error) {
+      console.error('❌ Failed to start tracking:', error);
     }
   };
 
   const stopTracking = () => {
     if (skeletonProviderRef.current) {
       skeletonProviderRef.current.stopLiveDetection();
-      setIsTracking(false);
+      setIsDetectionActive(false);
     }
   };
 
   const toggleGameMode = () => {
     setGameMode(prev => prev === 'visualization' ? 'physics' : 'visualization');
-  };
-
-  const applyRandomForce = () => {
-    if (!physicsSystemRef.current) return;
-
-    // Apply random forces to hand joints for fun
-    const leftWristId = 15; // Left wrist
-    const rightWristId = 16; // Right wrist
-
-    const force = new THREE.Vector3(
-      (Math.random() - 0.5) * 10,
-      Math.random() * 5,
-      (Math.random() - 0.5) * 10
-    );
-
-    physicsSystemRef.current.applyForceToJoint(leftWristId, force);
-    physicsSystemRef.current.applyForceToJoint(rightWristId, force.clone().negate());
   };
 
   const resetGame = () => {
@@ -448,8 +446,147 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     if (rendererRef.current) {
       rendererRef.current.dispose();
     }
+    if (skeletonPhysicsRef.current) {
+      skeletonPhysicsRef.current.dispose();
+    }
     if (physicsSystemRef.current) {
       physicsSystemRef.current.dispose();
+    }
+  };
+
+  // Single unified animation loop that handles everything
+  useEffect(() => {
+    if (!systemsReady) return; // Start as soon as systems are ready, not just when tracking
+
+    let animationId: number;
+
+    const animate = () => {
+      try {
+        // Step physics simulation once per frame
+        if (skeletonPhysicsRef.current) {
+          skeletonPhysicsRef.current.step();
+        }
+
+        // Update all game objects from physics simulation
+        if (gameObjectsRef.current.length > 0) {
+          // Get skeleton joint positions from renderer for collision detection
+          const skeletonJointPositions = rendererRef.current?.getJointWorldPositions() || new Map();
+          
+          gameObjectsRef.current.forEach(({ rigidBody, mesh }, ballIndex) => {
+            try {
+              const pos = rigidBody.translation();
+              const rot = rigidBody.rotation();
+              const velocity = rigidBody.linvel();
+              
+              // Update mesh position and rotation
+              mesh.position.set(pos.x, pos.y, pos.z);
+              mesh.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+
+              // Check for collisions with skeleton joints (only when tracking is active)
+              if (isDetectionActive && skeletonJointPositions.size > 0) {
+                const ballPosition = new THREE.Vector3(pos.x, pos.y, pos.z);
+                const ballRadius = 0.08;
+                const jointRadius = 0.08;
+                const collisionDistance = ballRadius + jointRadius;
+
+                // Check collision with each skeleton joint
+                skeletonJointPositions.forEach((jointPos) => {
+                  const distance = ballPosition.distanceTo(jointPos);
+                  
+                  if (distance < collisionDistance) {
+                    const currentVelocity = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z);
+                    
+                    if (currentVelocity > 0.5) {
+                      setScore(prev => prev + 1);
+                      
+                      // Apply realistic hit impulse
+                      const hitDirection = new THREE.Vector3()
+                        .subVectors(ballPosition, jointPos)
+                        .normalize()
+                        .multiplyScalar(3.0);
+                      
+                      rigidBody.applyImpulse({
+                        x: hitDirection.x,
+                        y: hitDirection.y + 1.0,
+                        z: hitDirection.z
+                      }, true);
+                      
+                      // Visual feedback
+                      const originalColor = (mesh.material as THREE.MeshBasicMaterial).color.clone();
+                      (mesh.material as THREE.MeshBasicMaterial).color.setHex(0xffffff);
+                      setTimeout(() => {
+                        (mesh.material as THREE.MeshBasicMaterial).color.copy(originalColor);
+                      }, 200);
+                    }
+                  }
+                });
+              }
+
+              // Reset ball if it falls too far
+              if (pos.y < -3) {
+                const newPos = {
+                  x: (Math.random() - 0.5) * 1.5,
+                  y: 1.5 + Math.random() * 0.5,
+                  z: (Math.random() - 0.5) * 0.8
+                };
+                rigidBody.setTranslation(newPos, true);
+                rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+              }
+            } catch (error) {
+              console.error(`❌ Error updating ball ${ballIndex}:`, error);
+            }
+          });
+        }
+
+        // Continue animation loop
+        animationId = requestAnimationFrame(animate);
+      } catch (error) {
+        console.error('❌ Animation loop error:', error);
+        animationId = requestAnimationFrame(animate);
+      }
+    };
+
+    animationId = requestAnimationFrame(animate);
+
+    return () => {
+      if (animationId) {
+        cancelAnimationFrame(animationId);
+      }
+    };
+  }, [systemsReady, isDetectionActive]);
+
+  // Toggle skeleton overlay on video
+  const toggleSkeletonOverlay = async () => {
+    if (!videoRef.current || !skeletonProviderRef.current) return;
+
+    if (showSkeletonOverlay && skeletonOverlayRef.current) {
+      // Disable overlay
+      console.log('🔴 Disabling skeleton overlay');
+      skeletonOverlayRef.current.dispose();
+      const canvas = skeletonOverlayRef.current.getCanvas();
+      if (canvas.parentElement) {
+        canvas.parentElement.removeChild(canvas);
+      }
+      skeletonOverlayRef.current = null;
+      setShowSkeletonOverlay(false);
+    } else {
+      // Enable overlay
+      console.log('🟢 Enabling skeleton overlay');
+      try {
+        const overlay = await skeletonProviderRef.current.enableDebugOverlay(videoRef.current, {
+          jointSize: 8,
+          boneThickness: 3,
+          jointColor: '#FF0040',
+          boneColor: '#00FF40',
+          showJointLabels: true,
+          showConfidence: true
+        });
+        skeletonOverlayRef.current = overlay;
+        setShowSkeletonOverlay(true);
+        console.log('✅ Skeleton overlay enabled');
+      } catch (error) {
+        console.error('❌ Failed to enable skeleton overlay:', error);
+      }
     }
   };
 
@@ -458,8 +595,9 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
       {/* Full-window 3D canvas */}
       <div 
         ref={canvasContainerRef}
-        className="canvas-container"
-      />
+        className="canvas-container">
+        <canvas ref={canvasRef}/>
+      </div>
 
       {/* Camera video overlay - top right */}
       <div className="video-overlay">
@@ -477,33 +615,30 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
         <h2>Live Human Skeleton Physics Demo</h2>
         
         <div className="status">
-          <span>Status: {isInitialized ? 'Ready' : 'Initializing...'}</span>
-          <span>Tracking: {isTracking ? 'ON' : 'OFF'}</span>
+          <span>Status: {systemsReady ? 'Ready' : 'Initializing...'}</span>
+          <span>Tracking: {isDetectionActive ? 'ON' : 'OFF'}</span>
           <span>Mode: {gameMode}</span>
           <span>Score: {score}</span>
         </div>
 
         <div className="buttons">
-          {isInitialized && (
+          {systemsReady && (
             <>
-              <button onClick={isTracking ? stopTracking : startTracking}>
-                {isTracking ? 'Stop Tracking' : 'Start Tracking'}
+              <button onClick={isDetectionActive ? stopTracking : startTracking}>
+                {isDetectionActive ? 'Stop Tracking' : 'Start Tracking'}
               </button>
               
               <button onClick={toggleGameMode}>
                 Switch to {gameMode === 'visualization' ? 'Physics' : 'Visualization'} Mode
               </button>
               
-              {gameMode === 'physics' && (
-                <>
-                  <button onClick={applyRandomForce}>
-                    Apply Random Force
-                  </button>
-                  <button onClick={resetGame}>
-                    Reset Game
-                  </button>
-                </>
-              )}
+              <button onClick={resetGame}>
+                Reset Game
+              </button>
+              
+              <button onClick={toggleSkeletonOverlay}>
+                {showSkeletonOverlay ? 'Hide' : 'Show'} Skeleton Overlay
+              </button>
             </>
           )}
         </div>

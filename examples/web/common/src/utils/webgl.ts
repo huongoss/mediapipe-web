@@ -48,21 +48,169 @@ export class WebGLRenderer {
     `;
 
     const fragmentShaderSource = `
-      precision mediump float;
+      precision highp float;
       uniform sampler2D u_image;
       uniform sampler2D u_mask;
       varying vec2 v_texCoord;
       
-      void main() {
-        vec4 imageColor = texture2D(u_image, v_texCoord);
-        vec4 maskColor = texture2D(u_mask, v_texCoord);
+      // High-quality Gaussian blur function with optimized sampling
+      vec4 getBlurredColor(sampler2D tex, vec2 coord) {
+        vec2 texelSize = vec2(1.0) / vec2(textureSize(tex, 0));
+        vec4 color = vec4(0.0);
         
-        // If mask is background (low value), make transparent, else keep person
-        if (maskColor.r > 0.1) {
-          gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-        } else {
-          gl_FragColor = imageColor;
+        // 13-tap optimized Gaussian blur kernel for higher quality
+        float weights[13];
+        weights[0] = 0.0044; weights[1] = 0.0175; weights[2] = 0.0540;
+        weights[3] = 0.1295; weights[4] = 0.2420; weights[5] = 0.3521;
+        weights[6] = 0.3989; weights[7] = 0.3521; weights[8] = 0.2420;
+        weights[9] = 0.1295; weights[10] = 0.0540; weights[11] = 0.0175;
+        weights[12] = 0.0044;
+        
+        // Horizontal blur with sub-pixel sampling
+        for (int i = 0; i < 13; i++) {
+          float offset = float(i - 6) * 1.5; // Increased sampling radius
+          vec2 sampleCoord = coord + vec2(offset * texelSize.x, 0.0);
+          color += texture2D(tex, sampleCoord) * weights[i];
         }
+        
+        return color;
+      }
+      
+      vec4 getDoubleBlurredColor(sampler2D tex, vec2 coord) {
+        vec2 texelSize = vec2(1.0) / vec2(textureSize(tex, 0));
+        vec4 color = vec4(0.0);
+        
+        // 13-tap optimized Gaussian blur kernel
+        float weights[13];
+        weights[0] = 0.0044; weights[1] = 0.0175; weights[2] = 0.0540;
+        weights[3] = 0.1295; weights[4] = 0.2420; weights[5] = 0.3521;
+        weights[6] = 0.3989; weights[7] = 0.3521; weights[8] = 0.2420;
+        weights[9] = 0.1295; weights[10] = 0.0540; weights[11] = 0.0175;
+        weights[12] = 0.0044;
+        
+        // Vertical blur with sub-pixel sampling
+        for (int i = 0; i < 13; i++) {
+          float offset = float(i - 6) * 1.5;
+          vec2 sampleCoord = coord + vec2(0.0, offset * texelSize.y);
+          color += getBlurredColor(tex, sampleCoord) * weights[i];
+        }
+        
+        return color;
+      }
+      
+      // Advanced edge detection and smoothing
+      float getHighQualityMask(vec2 coord) {
+        vec2 texelSize = vec2(1.0) / vec2(textureSize(u_mask, 0));
+        
+        // Multi-sample edge detection with rotated grid
+        float samples = 0.0;
+        float sampleCount = 0.0;
+        
+        // Primary sample
+        float center = texture2D(u_mask, coord).r;
+        samples += center;
+        sampleCount += 1.0;
+        
+        // 8-direction sampling with sub-pixel offsets
+        vec2 offsets[8];
+        offsets[0] = vec2(-1.0, -1.0); offsets[1] = vec2( 0.0, -1.0);
+        offsets[2] = vec2( 1.0, -1.0); offsets[3] = vec2( 1.0,  0.0);
+        offsets[4] = vec2( 1.0,  1.0); offsets[5] = vec2( 0.0,  1.0);
+        offsets[6] = vec2(-1.0,  1.0); offsets[7] = vec2(-1.0,  0.0);
+        
+        float weights[8];
+        weights[0] = 0.7071; weights[1] = 1.0; weights[2] = 0.7071; weights[3] = 1.0;
+        weights[4] = 0.7071; weights[5] = 1.0; weights[6] = 0.7071; weights[7] = 1.0;
+        
+        for (int i = 0; i < 8; i++) {
+          vec2 sampleCoord = coord + offsets[i] * texelSize * 0.5;
+          float sample = texture2D(u_mask, sampleCoord).r;
+          samples += sample * weights[i];
+          sampleCount += weights[i];
+        }
+        
+        // Additional sub-pixel sampling for critical edge areas
+        float variance = 0.0;
+        float avgSample = samples / sampleCount;
+        
+        for (int i = 0; i < 8; i++) {
+          vec2 sampleCoord = coord + offsets[i] * texelSize * 0.5;
+          float sample = texture2D(u_mask, sampleCoord).r;
+          float diff = sample - avgSample;
+          variance += diff * diff * weights[i];
+        }
+        variance /= sampleCount;
+        
+        // Enhanced sampling for high-variance (edge) regions
+        if (variance > 0.02) {
+          // Rotated grid sampling for better edge coverage
+          vec2 rotatedOffsets[4];
+          rotatedOffsets[0] = vec2(-0.5, -0.5); rotatedOffsets[1] = vec2( 0.5, -0.5);
+          rotatedOffsets[2] = vec2( 0.5,  0.5); rotatedOffsets[3] = vec2(-0.5,  0.5);
+          
+          for (int i = 0; i < 4; i++) {
+            vec2 sampleCoord = coord + rotatedOffsets[i] * texelSize * 0.25;
+            float sample = texture2D(u_mask, sampleCoord).r;
+            samples += sample * 0.5;
+            sampleCount += 0.5;
+          }
+        }
+        
+        return samples / sampleCount;
+      }
+      
+      // Multi-level smoothstep for ultra-smooth edges
+      float applySuperSmoothstep(float x) {
+        // Triple smoothstep for maximum smoothness
+        float s1 = smoothstep(0.0, 1.0, x);
+        float s2 = smoothstep(0.0, 1.0, s1);
+        float s3 = smoothstep(0.0, 1.0, s2);
+        
+        // Blend for optimal balance between smoothness and precision
+        return mix(mix(s1, s2, 0.6), s3, 0.4);
+      }
+      
+      void main() {
+        // High-quality mask sampling with edge detection
+        float rawMask = getHighQualityMask(v_texCoord);
+        
+        // Apply ultra-high-quality edge smoothing
+        float alpha = applySuperSmoothstep(rawMask);
+        
+        // Additional gradient-based refinement
+        vec2 texelSize = vec2(1.0) / vec2(textureSize(u_mask, 0));
+        
+        // Compute local gradient for adaptive processing
+        float dx = getHighQualityMask(v_texCoord + vec2(texelSize.x, 0.0)) - 
+                   getHighQualityMask(v_texCoord - vec2(texelSize.x, 0.0));
+        float dy = getHighQualityMask(v_texCoord + vec2(0.0, texelSize.y)) - 
+                   getHighQualityMask(v_texCoord - vec2(0.0, texelSize.y));
+        
+        float gradient = length(vec2(dx, dy));
+        
+        // Edge-aware alpha refinement
+        if (gradient > 0.1) {
+          // High-gradient areas get extra smoothing
+          float edgeMask = 1.0 - exp(-gradient * 10.0);
+          float smoothAlpha = applySuperSmoothstep(
+            applySuperSmoothstep(rawMask)
+          );
+          alpha = mix(alpha, smoothAlpha, edgeMask * 0.7);
+        }
+        
+        // Final micro-adjustment for pixel-perfect edges
+        alpha = mix(alpha, applySuperSmoothstep(alpha), 0.3);
+        
+        // Get sharp and blurred versions of the image
+        vec4 sharpImage = texture2D(u_image, v_texCoord);
+        vec4 blurredImage = getDoubleBlurredColor(u_image, v_texCoord);
+        
+        // Ultra-smooth blending with gamma correction for better perceived smoothness
+        float gammaAlpha = pow(alpha, 0.8); // Slight gamma adjustment
+        vec4 finalColor = mix(blurredImage, sharpImage, gammaAlpha);
+        
+        // Keep original image colors with ultra-smooth mask edges
+        gl_FragColor = vec4(finalColor.rgb, 1.0);
       }
     `;
 
@@ -201,4 +349,4 @@ export const createFallbackMaskTexture = (gl: WebGL2RenderingContext): WebGLText
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   
   return texture;
-}; 
+};

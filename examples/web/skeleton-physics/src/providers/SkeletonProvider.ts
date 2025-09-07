@@ -7,10 +7,18 @@ export interface SkeletonJoint {
   connections: number[];
 }
 
+export interface MovementRange {
+  min: { x: number; y: number; z: number };
+  max: { x: number; y: number; z: number };
+  center: { x: number; y: number; z: number };
+  size: { x: number; y: number; z: number };
+}
+
 export interface SkeletonData {
   joints: SkeletonJoint[];
   timestamp: number;
   confidence: number;
+  movementRange?: MovementRange;
 }
 
 export type SkeletonUpdateCallback = (skeleton: SkeletonData | null) => void;
@@ -23,6 +31,7 @@ export class SkeletonProvider {
   private poseLandmarker: any = null;
   private callbacks: Set<SkeletonUpdateCallback> = new Set();
   private isProcessing = false;
+  private isPaused = false;
   private lastFrameTime = 0;
 
   // Pose landmark connections (based on MediaPipe pose topology)
@@ -73,42 +82,105 @@ export class SkeletonProvider {
     'left_foot_index', 'right_foot_index'
   ];
 
+  // Movement range tracking
+  private movementBounds = {
+    min: { x: Infinity, y: Infinity, z: Infinity },
+    max: { x: -Infinity, y: -Infinity, z: -Infinity }
+  };
+  private boundsSampleCount = 0;
+  private readonly maxSamples = 300; // Track last 10 seconds at 30fps
+
   async initialize(modelPath: string): Promise<void> {
     console.log('🔧 SkeletonProvider: Starting initialization...');
     console.log('📁 Model path:', modelPath);
     
     try {
-      const { FilesetResolver, PoseLandmarker } = await import('@mediapipe/tasks-vision');
-      console.log('✅ MediaPipe modules imported successfully');
-      
-      const vision = await FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm"
-      );
-      console.log('✅ Vision fileset resolver created');
+      // Ensure we're running in a browser environment
+      if (typeof window === 'undefined') {
+        throw new Error('SkeletonProvider requires a browser environment');
+      }
 
-      // Create PoseLandmarker with VIDEO running mode for live video processing
-      this.poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: modelPath
-        },
-        runningMode: 'VIDEO',
-        numPoses: 1,
-        minPoseDetectionConfidence: 0.5,
-        minPosePresenceConfidence: 0.5,
-        minTrackingConfidence: 0.5,
-        outputSegmentationMasks: false
-      });
-      console.log('✅ PoseLandmarker created with VIDEO mode');
-      console.log('⚙️ Configuration:', {
-        runningMode: 'VIDEO',
-        numPoses: 1,
-        minPoseDetectionConfidence: 0.5,
-        minPosePresenceConfidence: 0.5,
-        minTrackingConfidence: 0.5
-      });
+      // Check for WebGL2 support
+      const canvas = document.createElement('canvas');
+      const gl = canvas.getContext('webgl2');
+      if (!gl) {
+        throw new Error('WebGL2 is not supported. Please use a modern browser.');
+      }
+      console.log('✅ WebGL2 support confirmed');
+
+      // Import MediaPipe with better error handling
+      let vision, PoseLandmarker;
+      try {
+        const mediapipeModule = await import('@mediapipe/tasks-vision');
+        PoseLandmarker = mediapipeModule.PoseLandmarker;
+        const FilesetResolver = mediapipeModule.FilesetResolver;
+        
+        console.log('✅ MediaPipe modules imported successfully');
+        
+        // Create vision fileset resolver with proper WASM path
+        vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+        );
+        console.log('✅ Vision fileset resolver created');
+      } catch (importError) {
+        console.error('❌ Failed to import MediaPipe modules:', importError);
+        throw new Error(`MediaPipe import failed: ${importError instanceof Error ? importError.message : String(importError)}`);
+      }
+
+      // Validate model path
+      if (!modelPath || typeof modelPath !== 'string') {
+        throw new Error('Invalid model path provided');
+      }
+
+      // Create PoseLandmarker with robust configuration
+      try {
+        this.poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: modelPath,
+            delegate: 'GPU' // Try GPU first, will fallback to CPU if needed
+          },
+          runningMode: 'VIDEO',
+          numPoses: 1,
+          minPoseDetectionConfidence: 0.3, // Lower threshold for better detection
+          minPosePresenceConfidence: 0.3,
+          minTrackingConfidence: 0.3,
+          outputSegmentationMasks: false
+        });
+        console.log('✅ PoseLandmarker created with VIDEO mode');
+        console.log('⚙️ Configuration:', {
+          runningMode: 'VIDEO',
+          numPoses: 1,
+          minPoseDetectionConfidence: 0.3,
+          minPosePresenceConfidence: 0.3,
+          minTrackingConfidence: 0.3
+        });
+      } catch (createError) {
+        console.error('❌ Failed to create PoseLandmarker:', createError);
+        // Try with CPU delegate as fallback
+        console.log('🔄 Retrying with CPU delegate...');
+        try {
+          this.poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: modelPath,
+              delegate: 'CPU'
+            },
+            runningMode: 'VIDEO',
+            numPoses: 1,
+            minPoseDetectionConfidence: 0.3,
+            minPosePresenceConfidence: 0.3,
+            minTrackingConfidence: 0.3,
+            outputSegmentationMasks: false
+          });
+          console.log('✅ PoseLandmarker created with CPU delegate');
+        } catch (fallbackError) {
+          console.error('❌ CPU fallback also failed:', fallbackError);
+          throw new Error(`PoseLandmarker creation failed: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`);
+        }
+      }
+
     } catch (error) {
       console.error('❌ SkeletonProvider initialization failed:', error);
-      throw error;
+      throw new Error(`SkeletonProvider initialization failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -155,22 +227,70 @@ export class SkeletonProvider {
   }
 
   /**
-   * Process a single image for skeleton detection
+   * Reset movement range tracking
    */
-  async detectFromImage(image: HTMLImageElement | ImageData): Promise<SkeletonData | null> {
-    if (!this.poseLandmarker) return null;
+  resetMovementRange(): void {
+    console.log('🔄 Resetting movement range tracking');
+    this.movementBounds = {
+      min: { x: Infinity, y: Infinity, z: Infinity },
+      max: { x: -Infinity, y: -Infinity, z: -Infinity }
+    };
+    this.boundsSampleCount = 0;
+  }
 
-    try {
-      const result = this.poseLandmarker.detect(image);
-      return this.convertResultToSkeleton(result);
-    } catch (error) {
-      console.error('Skeleton detection failed:', error);
-      return null;
+  /**
+   * Get current movement range
+   */
+  getMovementRange(): MovementRange | null {
+    if (this.boundsSampleCount < 10) return null; // Need some samples first
+    
+    const size = {
+      x: this.movementBounds.max.x - this.movementBounds.min.x,
+      y: this.movementBounds.max.y - this.movementBounds.min.y,
+      z: this.movementBounds.max.z - this.movementBounds.min.z
+    };
+
+    const center = {
+      x: (this.movementBounds.min.x + this.movementBounds.max.x) / 2,
+      y: (this.movementBounds.min.y + this.movementBounds.max.y) / 2,
+      z: (this.movementBounds.min.z + this.movementBounds.max.z) / 2
+    };
+
+    return {
+      min: { ...this.movementBounds.min },
+      max: { ...this.movementBounds.max },
+      center,
+      size
+    };
+  }
+
+  /**
+   * Pause skeleton detection processing
+   */
+  pause(): void {
+    console.log('⏸️ Pausing skeleton detection');
+    this.isPaused = true;
+  }
+
+  /**
+   * Resume skeleton detection processing
+   */
+  resume(): void {
+    console.log('▶️ Resuming skeleton detection');
+    this.isPaused = false;
+    // If we were processing, restart the frame processing loop
+    if (this.isProcessing) {
+      // Find the video element to restart processing (this is a simplified approach)
+      // In a real implementation, you might want to store the video reference
+      const videoElements = document.querySelectorAll('video');
+      if (videoElements.length > 0) {
+        this.processVideoFrame(videoElements[0] as HTMLVideoElement);
+      }
     }
   }
 
   private async processVideoFrame(video: HTMLVideoElement): Promise<void> {
-    if (!this.isProcessing || !this.poseLandmarker) return;
+    if (!this.isProcessing || !this.poseLandmarker || this.isPaused) return;
 
     const currentTime = video.currentTime;
     if (currentTime !== this.lastFrameTime) {
@@ -178,55 +298,111 @@ export class SkeletonProvider {
 
       try {
         const timestamp = performance.now();
-        console.log('🔍 Processing video frame at timestamp:', timestamp);
+        //console.log('🔍 Processing video frame at timestamp:', timestamp);
         
         const result = this.poseLandmarker.detectForVideo(video, timestamp);
-        console.log('📊 Detection result:', {
-          hasLandmarks: !!result.landmarks,
-          landmarkCount: result.landmarks?.length || 0,
-          hasWorldLandmarks: !!result.worldLandmarks,
-          worldLandmarkCount: result.worldLandmarks?.length || 0
-        });
+        // console.log('📊 Detection result:', {
+        //   hasLandmarks: !!result.landmarks,
+        //   landmarkCount: result.landmarks?.length || 0,
+        //   hasWorldLandmarks: !!result.worldLandmarks,
+        //   worldLandmarkCount: result.worldLandmarks?.length || 0
+        // });
         
         const skeleton = this.convertResultToSkeleton(result);
         
-        if (skeleton) {
-          console.log('💀 Skeleton created:', {
-            jointCount: skeleton.joints.length,
-            confidence: skeleton.confidence,
-            timestamp: skeleton.timestamp
-          });
+        // if (skeleton) {
+        //   console.log('💀 Skeleton created:', {
+        //     jointCount: skeleton.joints.length,
+        //     confidence: skeleton.confidence,
+        //     timestamp: skeleton.timestamp
+        //   });
           
-          // Log some key joints for debugging
-          const nose = skeleton.joints[0];
-          const leftWrist = skeleton.joints[15];
-          const rightWrist = skeleton.joints[16];
-          console.log('🔍 Key joints:', {
-            nose: { visibility: nose.visibility, position: nose.worldPosition },
-            leftWrist: { visibility: leftWrist.visibility, position: leftWrist.worldPosition },
-            rightWrist: { visibility: rightWrist.visibility, position: rightWrist.worldPosition }
-          });
-        } else {
-          console.log('⚠️ No skeleton detected in this frame');
-        }
+          // Log some key joints for debugging (less verbose)
+          // if (Math.random() < 0.1) { // Only log 10% of the time
+          //   const nose = skeleton.joints[0];
+          //   const leftWrist = skeleton.joints[15];
+          //   const rightWrist = skeleton.joints[16];
+          //   console.log('🔍 Key joints:', {
+          //     nose: { visibility: nose.visibility, position: nose.worldPosition },
+          //     leftWrist: { visibility: leftWrist.visibility, position: leftWrist.worldPosition },
+          //     rightWrist: { visibility: rightWrist.visibility, position: rightWrist.worldPosition }
+          //   });
+          // }
+        // } else {
+        //   console.log('⚠️ No skeleton detected in this frame');
+        // }
         
         // Notify all subscribers
-        console.log(`📢 Notifying ${this.callbacks.size} subscribers`);
-        this.callbacks.forEach(callback => callback(skeleton));
+        if (Math.random() < 0.1) { // Reduce log spam
+          //console.log(`📢 Notifying ${this.callbacks.size} subscribers`);
+        }
+        this.callbacks.forEach(callback => {
+          try {
+            callback(skeleton);
+          } catch (callbackError) {
+            console.error('❌ Subscriber callback failed:', callbackError);
+          }
+        });
       } catch (error) {
         console.error('❌ Video frame processing failed:', error);
-        this.callbacks.forEach(callback => callback(null));
+        this.callbacks.forEach(callback => {
+          try {
+            callback(null);
+          } catch (callbackError) {
+            console.error('❌ Error callback failed:', callbackError);
+          }
+        });
       }
     }
 
-    // Continue processing
-    if (this.isProcessing) {
-      requestAnimationFrame(() => this.processVideoFrame(video));
+    // Continue processing with error handling
+    if (this.isProcessing && !this.isPaused) {
+      try {
+        requestAnimationFrame(() => this.processVideoFrame(video));
+      } catch (error) {
+        console.error('❌ Failed to schedule next frame:', error);
+        this.isProcessing = false;
+      }
+    }
+  }
+
+  private updateMovementBounds(joints: SkeletonJoint[]): void {
+    // Only track key body joints for movement bounds (avoid noise from fingers/face)
+    const keyJointIds = [
+      11, 12, // shoulders
+      13, 14, // elbows  
+      15, 16, // wrists
+      23, 24, // hips
+      25, 26, // knees
+      27, 28  // ankles
+    ];
+
+    joints.forEach(joint => {
+      if (keyJointIds.includes(joint.id) && joint.visibility > 0.7) {
+        const pos = joint.worldPosition;
+        
+        // Update bounds
+        this.movementBounds.min.x = Math.min(this.movementBounds.min.x, pos.x);
+        this.movementBounds.min.y = Math.min(this.movementBounds.min.y, pos.y);
+        this.movementBounds.min.z = Math.min(this.movementBounds.min.z, pos.z);
+        
+        this.movementBounds.max.x = Math.max(this.movementBounds.max.x, pos.x);
+        this.movementBounds.max.y = Math.max(this.movementBounds.max.y, pos.y);
+        this.movementBounds.max.z = Math.max(this.movementBounds.max.z, pos.z);
+      }
+    });
+
+    this.boundsSampleCount++;
+    
+    // Prevent bounds from growing indefinitely - reset after max samples
+    if (this.boundsSampleCount > this.maxSamples) {
+      console.log('📊 Movement range tracking reset (max samples reached)');
+      this.resetMovementRange();
     }
   }
 
   private convertResultToSkeleton(result: any): SkeletonData | null {
-    console.log('🔄 Converting MediaPipe result to skeleton data');
+    //console.log('🔄 Converting MediaPipe result to skeleton data');
     
     if (!result.landmarks || result.landmarks.length === 0) {
       console.log('❌ No landmarks in result');
@@ -236,11 +412,11 @@ export class SkeletonProvider {
     const landmarks = result.landmarks[0];
     const worldLandmarks = result.worldLandmarks?.[0];
 
-    console.log('📍 Landmarks found:', {
-      landmarkCount: landmarks.length,
-      hasWorldLandmarks: !!worldLandmarks,
-      worldLandmarkCount: worldLandmarks?.length || 0
-    });
+    // console.log('📍 Landmarks found:', {
+    //   landmarkCount: landmarks.length,
+    //   hasWorldLandmarks: !!worldLandmarks,
+    //   worldLandmarkCount: worldLandmarks?.length || 0
+    // });
 
     if (!landmarks || landmarks.length < 33) {
       console.log('❌ Insufficient landmarks:', landmarks.length);
@@ -273,19 +449,32 @@ export class SkeletonProvider {
       };
     });
 
+    // Update movement bounds tracking
+    this.updateMovementBounds(joints);
+
     // Calculate overall confidence based on visibility
     const avgVisibility = joints.reduce((sum, joint) => sum + joint.visibility, 0) / joints.length;
 
-    console.log('✅ Skeleton conversion complete:', {
-      jointCount: joints.length,
-      avgVisibility: avgVisibility.toFixed(3),
-      visibleJoints: joints.filter(j => j.visibility > 0.5).length
-    });
+    // console.log('✅ Skeleton conversion complete:', {
+    //   jointCount: joints.length,
+    //   avgVisibility: avgVisibility.toFixed(3),
+    //   visibleJoints: joints.filter(j => j.visibility > 0.5).length
+    // });
+
+    //const movementRange = this.getMovementRange();
+    // if (movementRange) {
+    //   console.log('📏 Movement range:', {
+    //     size: movementRange.size,
+    //     center: movementRange.center,
+    //     samples: this.boundsSampleCount
+    //   });
+    // }
 
     return {
       joints,
       timestamp: performance.now(),
-      confidence: avgVisibility
+      confidence: avgVisibility,
+      //movementRange: movementRange || undefined
     };
   }
 
@@ -307,6 +496,26 @@ export class SkeletonProvider {
    */
   static getJointNames(): string[] {
     return [...SkeletonProvider.JOINT_NAMES];
+  }
+
+  /**
+   * Enable debug overlay mode that shows skeleton on original camera image
+   */
+  enableDebugOverlay(videoElement: HTMLVideoElement, options: any = {}): any {
+    console.log('🐛 Enabling debug skeleton overlay on video');
+    
+    // Import overlay dynamically to avoid circular dependencies
+    return import('../renderers/SkeletonVideoOverlay').then(({ createVideoSkeletonOverlay }) => {
+      return createVideoSkeletonOverlay(videoElement, this, {
+        jointSize: 6,
+        boneThickness: 2,
+        jointColor: '#FF0040',
+        boneColor: '#00FF40',
+        showJointLabels: false, // Keep labels off by default for cleaner view
+        showConfidence: true,
+        ...options
+      });
+    });
   }
 
   dispose(): void {
