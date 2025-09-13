@@ -433,16 +433,16 @@ export class SkeletonProvider {
         position: {
           x: landmark.x,
           y: landmark.y,
-          z: landmark.z || 0
+          z: 0///landmark.z || 0
         },
         worldPosition: worldLandmark ? {
           x: worldLandmark.x,
           y: worldLandmark.y,
-          z: worldLandmark.z
+          z: 0//worldLandmark.z
         } : {
           x: landmark.x,
           y: landmark.y,
-          z: landmark.z || 0
+          z: 0///landmark.z || 0
         },
         visibility: landmark.visibility || 1.0,
         connections

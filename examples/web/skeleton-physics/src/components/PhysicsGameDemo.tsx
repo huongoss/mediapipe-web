@@ -44,6 +44,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
   const [showSkeletonOverlay, setShowSkeletonOverlay] = useState(false);
   const skeletonOverlayRef = useRef<any>(null);
   const focusManagerRef = useRef<FocusManager | null>(null);
+  const [isPaused, setIsPaused] = useState(false);
 
   // Create pausable wrappers for all components
   const pausableComponents = useRef<PausableComponent[]>([]);
@@ -87,8 +88,14 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
 
       // Create pausable wrapper for skeleton provider
       const pausableProvider: PausableComponent = {
-        pause: () => skeletonProvider.pause(),
-        resume: () => skeletonProvider.resume()
+        pause: () => {
+          setIsPaused(true)
+          skeletonProvider.pause()
+        },
+        resume: () => {
+          setIsPaused(false)
+          skeletonProvider.resume()
+        }
       };
       pausableComponents.current.push(pausableProvider);
       focusManagerRef.current?.register(pausableProvider);
@@ -470,6 +477,10 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     let lastTime = performance.now();
 
     const animate = (time: number) => {
+      if(isPaused) {
+        animationId = requestAnimationFrame(animate);
+        return;
+      }
       const deltaSeconds = Math.min(0.05, Math.max(0, (time - lastTime) / 1000));
       lastTime = time;
 
@@ -605,7 +616,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
               }
 
               // Reuse ball by respawning when out of bounds
-              if (pos.y < -0) {
+              if (pos.y < -2) {
                 const { position: newPosition, velocity: newVelocity } = generateBallSpawn();
                 rigidBody.setTranslation({ x: newPosition.x, y: newPosition.y, z: 0 }, true);
                 rigidBody.setLinvel(newVelocity, true);

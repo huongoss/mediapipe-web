@@ -139,7 +139,7 @@ export class SkeletonPhysicsAdapter {
       this.physicsSystem.setPosition(id, {
         x: -pos.x, // Mirror camera
         y: -pos.y, // Flip Y coordinate
-        z: pos.z
+        z: 0//pos.z
       });
     });
   }
