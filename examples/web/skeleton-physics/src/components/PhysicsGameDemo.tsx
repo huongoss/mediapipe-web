@@ -7,11 +7,12 @@ import { SkeletonPhysicsAdapter } from '../physics/SkeletonPhysicsAdapter';
 import { FocusManager, type PausableComponent } from '../utils/FocusManager';
 import { generateBallSpawn } from '../game/BallSpawner';
 import { createCollisionEffect, type CollisionEffect } from '../game/CollisionEffects';
+import { AudioManager } from '../audio/AudioManager';
 
 // Pool and ball constants
-const MAX_BALLS = 10;
+const MAX_BALLS = 20;
 const BALL_RADIUS = 0.08;
-const OFFSCREEN_POS = new THREE.Vector3(0, -10, 0);
+const OFFSCREEN_POS = new THREE.Vector3(0, -3, 0);
 
 interface PhysicsGameDemoProps {
   modelPath: string;
@@ -33,6 +34,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
   const ballPoolRef = useRef<Array<{ rigidBody: any; mesh: THREE.Mesh; active: boolean }>>([]);
   const ballGeometryRef = useRef<THREE.SphereGeometry | null>(null);
   const collisionEffectsRef = useRef<CollisionEffect[]>([]);
+  const audioRef = useRef<AudioManager | null>(null);
   
   const [gameMode, setGameMode] = useState<'visualization' | 'physics'>('visualization');
   const [score, setScore] = useState(0);
@@ -45,6 +47,10 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
 
   // Create pausable wrappers for all components
   const pausableComponents = useRef<PausableComponent[]>([]);
+  // Track previous bone centers to compute velocities (m/s)
+  const prevBoneCentersRef = useRef<Map<string, THREE.Vector3>>(new Map());
+  // Track previous root X to compute body lateral velocity
+  const prevRootXRef = useRef<number | null>(null);
 
   useEffect(() => {
     if(!canvasRef.current) return;
@@ -100,6 +106,12 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
         });
         rendererRef.current = renderer;
         console.log('✅ Three.js renderer created');
+
+        // Init audio manager (will resume on first user gesture)
+        audioRef.current = new AudioManager();
+        audioRef.current.init();
+        const resumeAudioOnce = () => audioRef.current?.resume();
+        window.addEventListener('pointerdown', resumeAudioOnce, { once: true });
 
         // Create pausable wrapper for renderer
         const pausableRenderer: PausableComponent = {
@@ -429,7 +441,6 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
 
   const cleanup = () => {
     // Dispose pending collision effects
-    const scene = rendererRef.current?.getScene();
     collisionEffectsRef.current.forEach((fx) => {
       try { fx.dispose(); } catch {}
     });
@@ -447,6 +458,8 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     if (physicsSystemRef.current) {
       physicsSystemRef.current.dispose();
     }
+    audioRef.current?.dispose();
+    audioRef.current = null;
   };
 
   // Single unified animation loop that handles everything
@@ -479,12 +492,39 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
           }
         }
 
+        // Compute root (skeleton group) lateral velocity so bone speeds are relative to body motion
+        const rootGroup = rendererRef.current?.getSkeletonGroup?.();
+        const rootX = rootGroup ? rootGroup.position.x : 0;
+        let rootVelX = 0;
+        if (prevRootXRef.current !== null && deltaSeconds > 0) {
+          rootVelX = (rootX - prevRootXRef.current) / deltaSeconds;
+        }
+        prevRootXRef.current = rootX;
+
+        // Build bone segments and instantaneous relative speeds for audio intensity
+        const boneSegments = rendererRef.current?.getBoneWorldSegments?.() || [];
+        const boneRadius = rendererRef.current?.getBoneRadius?.() ?? 0.03; // fallback
+        const boneSpeeds = new Map<string, number>();
+        if (boneSegments.length > 0) {
+          for (const seg of boneSegments) {
+            const key = `${seg.fromId}-${seg.toId}`;
+            const center = new THREE.Vector3().addVectors(seg.start, seg.end).multiplyScalar(0.5);
+            const prev = prevBoneCentersRef.current.get(key);
+            let speed = 0;
+            if (prev && deltaSeconds > 0) {
+              // Relative velocity = bone center velocity - root velocity (x only for now)
+              const v = new THREE.Vector3().copy(center).sub(prev).divideScalar(deltaSeconds);
+              v.x -= rootVelX;
+              speed = v.length();
+            }
+            boneSpeeds.set(key, speed);
+            prevBoneCentersRef.current.set(key, center);
+          }
+        }
+
         // Use pool for updates
         const activeBalls = ballPoolRef.current;
         if (activeBalls.length > 0) {
-          // Get skeleton joint positions from renderer for collision detection
-          const skeletonJointPositions = rendererRef.current?.getJointWorldPositions() || new Map();
-          
           activeBalls.forEach(({ rigidBody, mesh, active }, ballIndex) => {
             if (!active) return;
             try {
@@ -496,55 +536,76 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
               mesh.position.set(pos.x, pos.y, pos.z);
               mesh.quaternion.set(rot.x, rot.y, rot.z, rot.w);
 
-              // Check for collisions with skeleton joints (only when tracking is active)
-              if (isDetectionActive && skeletonJointPositions.size > 0) {
+              // Check for collisions with skeleton bones (segments) when tracking is active
+              if (isDetectionActive && boneSegments.length > 0) {
                 const ballPosition = new THREE.Vector3(pos.x, pos.y, pos.z);
                 const ballRadius = BALL_RADIUS;
-                const jointRadius = 0.08;
-                const collisionDistance = ballRadius + jointRadius;
+                const combinedCheck = (segStart: THREE.Vector3, segEnd: THREE.Vector3, segR: number) => {
+                  const ab = new THREE.Vector3().subVectors(segEnd, segStart);
+                  const ap = new THREE.Vector3().subVectors(ballPosition, segStart);
+                  const abLenSq = Math.max(1e-6, ab.lengthSq());
+                  const t = THREE.MathUtils.clamp(ap.dot(ab) / abLenSq, 0, 1);
+                  const closest = new THREE.Vector3().copy(segStart).addScaledVector(ab, t);
+                  const dist = closest.distanceTo(ballPosition);
+                  const overlap = (ballRadius + segR) - dist;
+                  return overlap > 0 ? { closest, dist, overlap } : null;
+                };
 
-                skeletonJointPositions.forEach((jointPos) => {
-                  const distance = ballPosition.distanceTo(jointPos);
-                  if (distance < collisionDistance) {
-                    const currentVelocity = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z);
-                    if (currentVelocity > 0.05) {
-                      setScore(prev => prev + 1);
+                // Iterate segments; react to first collision found
+                for (const seg of boneSegments) {
+                  const hit = combinedCheck(seg.start, seg.end, Math.max(boneRadius, 0.06)); // slightly enlarged bone for gameplay
+                  if (!hit) continue;
 
-                      // Apply realistic hit impulse
-                      const hitDirection = new THREE.Vector3()
-                        .subVectors(ballPosition, jointPos)
-                        .normalize()
-                        .multiplyScalar(3.0);
-                      rigidBody.applyImpulse({
-                        x: hitDirection.x,
-                        y: hitDirection.y + 1.0,
-                        z: hitDirection.z
-                      }, true);
+                  const key = `${seg.fromId}-${seg.toId}`;
+                  const boneSpeed = boneSpeeds.get(key) ?? 0;
+                  const intensity = THREE.MathUtils.clamp(boneSpeed / 2.5, 0.2, 1); // scale speed -> [0,1]
 
-                      // Visual collision effect at the contact point on the ball surface
-                      const dir = new THREE.Vector3().subVectors(ballPosition, jointPos).normalize();
-                      const contactPoint = ballPosition.clone().addScaledVector(dir, -ballRadius);
-                      const scene = rendererRef.current?.getScene();
-                      if (scene) {
-                        const fx = createCollisionEffect(scene, contactPoint, {
-                          color: (mesh.material as THREE.MeshBasicMaterial).color.getHex(),
-                        });
-                        collisionEffectsRef.current.push(fx);
-                      }
+                  // Compute impulse away from contact towards ball
+                  const hitDirection = new THREE.Vector3()
+                    .subVectors(ballPosition, hit.closest)
+                    .normalize()
+                    .multiplyScalar(2.5 + Math.min(3.0, boneSpeed * 0.6));
+                  rigidBody.applyImpulse({
+                    x: hitDirection.x,
+                    y: hitDirection.y + 0.8,
+                    z: hitDirection.z
+                  }, true);
 
-                      // Temporary color flash for the ball
-                      const originalColor = (mesh.material as THREE.MeshBasicMaterial).color.clone();
-                      (mesh.material as THREE.MeshBasicMaterial).color.setHex(0xffffff);
-                      setTimeout(() => {
-                        (mesh.material as THREE.MeshBasicMaterial).color.copy(originalColor);
-                      }, 120);
-                    }
+                  setScore(prev => prev + 1);
+
+                  // Audio: pan by x, level by bone speed
+                  const pan = THREE.MathUtils.clamp(ballPosition.x / 2.0, -1, 1);
+                  audioRef.current?.playCollision(pan, intensity);
+                  const ballSpeed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z);
+                  if (ballSpeed > 0.1) {
+                    audioRef.current?.playBounceFast(pan, Math.min(1, intensity * 1.2));
                   }
-                });
+
+                  // Visual collision effect at contact point on ball surface
+                  const dir = new THREE.Vector3().subVectors(ballPosition, hit.closest).normalize();
+                  const contactPoint = ballPosition.clone().addScaledVector(dir, -ballRadius);
+                  const scene = rendererRef.current?.getScene();
+                  if (scene) {
+                    const fx = createCollisionEffect(scene, contactPoint, {
+                      color: (mesh.material as THREE.MeshBasicMaterial).color.getHex(),
+                    });
+                    collisionEffectsRef.current.push(fx);
+                  }
+
+                  // Temporary color flash for the ball
+                  const originalColor = (mesh.material as THREE.MeshBasicMaterial).color.clone();
+                  (mesh.material as THREE.MeshBasicMaterial).color.setHex(0xffffff);
+                  setTimeout(() => {
+                    (mesh.material as THREE.MeshBasicMaterial).color.copy(originalColor);
+                  }, 120);
+
+                  // Only handle first segment collision per frame for this ball
+                  break;
+                }
               }
 
               // Reuse ball by respawning when out of bounds
-              if (pos.y < -3) {
+              if (pos.y < -0) {
                 const { position: newPosition, velocity: newVelocity } = generateBallSpawn();
                 rigidBody.setTranslation({ x: newPosition.x, y: newPosition.y, z: 0 }, true);
                 rigidBody.setLinvel(newVelocity, true);

@@ -137,7 +137,7 @@ export class SkeletonPhysicsAdapter {
       const pos = joint.worldPosition;
       
       this.physicsSystem.setPosition(id, {
-        x: pos.x,
+        x: -pos.x, // Mirror camera
         y: -pos.y, // Flip Y coordinate
         z: pos.z
       });

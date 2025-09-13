@@ -14,7 +14,7 @@ export class PhysicsSystem {
 
   // Base simulation timestep (seconds) and default time scale (10x slower)
   private readonly baseTimestep = 1.0 / 60.0;
-  private timeScale = 0.1; // 10x slower than current
+  private timeScale = 0.2; // 10x slower than current
 
   async initialize(): Promise<void> {
     console.log('🔧 PhysicsSystem: Initializing...');

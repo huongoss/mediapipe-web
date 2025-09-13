@@ -40,6 +40,10 @@ export class ThreeSkeletonRenderer {
   private defaultJointMaterial: THREE.MeshBasicMaterial | null = null;
   private defaultBoneMaterial: THREE.MeshBasicMaterial | null = null;
 
+  // Horizontal follow state (for image-space X -> world offset)
+  private targetGroupX: number = 0;
+  private followXSmoothing: number = 0.2; // [0..1], higher = snappier
+
   constructor(container: HTMLElement|HTMLCanvasElement, options: SkeletonRenderOptions = {}) {
     this.options = {
       jointSize: 0.02,
@@ -55,6 +59,7 @@ export class ThreeSkeletonRenderer {
 
     this.scene = new THREE.Scene();
     this.skeletonGroup = new THREE.Group();
+    //this.scene.rotation.y = Math.PI; // Rotate to face camera
     this.scene.add(this.skeletonGroup);
 
     this.camera = new THREE.PerspectiveCamera();
@@ -82,7 +87,8 @@ export class ThreeSkeletonRenderer {
       0.1,
       1000
     );
-    this.camera.position.set(0, 0, 2);
+    // Look from inverted Z (negative Z) toward origin
+    this.camera.position.set(0, 0, -2);
   }
 
   private setupRenderer(container: HTMLElement|HTMLCanvasElement): void {
@@ -280,7 +286,53 @@ export class ThreeSkeletonRenderer {
     this.updateJointPositions(skeletonData.joints);
     this.updateBonePositions(skeletonData.joints);
 
+    // Update group horizontal offset from image-space center
+    this.updateGroupOffsetXFromImageSpace(skeletonData.joints);
+
     //console.log('✅ Skeleton visualization updated');
+  }
+
+  /**
+   * Compute horizontal group offset from image-space hip center and map to [-1, 1]
+   */
+  private updateGroupOffsetXFromImageSpace(joints: SkeletonJoint[]): void {
+    // Prefer hips (23, 24). Fallback to shoulders (11, 12). Finally nose (0)
+    const pickX = (idx: number) => {
+      const j = joints[idx];
+      if (!j) return null;
+      const vis = j.visibility ?? 0;
+      if (vis < 0.4) return null; // require some confidence
+      const x = j.position?.x;
+      if (typeof x !== 'number') return null;
+      return x; // expected in [0,1]
+    };
+
+    const lHip = pickX(23);
+    const rHip = pickX(24);
+
+    let centerX: number | null = null;
+    if (lHip !== null && rHip !== null) {
+      centerX = (lHip + rHip) * 0.5;
+    } else {
+      const lSh = pickX(11);
+      const rSh = pickX(12);
+      if (lSh !== null && rSh !== null) {
+        centerX = (lSh + rSh) * 0.5;
+      } else {
+        const nose = pickX(0);
+        if (nose !== null) centerX = nose;
+      }
+    }
+
+    if (centerX === null) return; // not enough info
+
+    // Map [0,1] -> [-1,1]
+    const mapped = THREE.MathUtils.clamp((centerX - 0.5) * 2, -1, 1);
+    this.targetGroupX = mapped;
+
+    // Smooth towards target
+    const alpha = THREE.MathUtils.clamp(this.followXSmoothing, 0, 1);
+    this.skeletonGroup.position.x = THREE.MathUtils.lerp(this.skeletonGroup.position.x, this.targetGroupX, alpha);
   }
 
   /**
@@ -335,34 +387,36 @@ export class ThreeSkeletonRenderer {
       // Show and position the bone
       boneMesh.visible = true;
       
-      const startPos = new THREE.Vector3(
-        fromJoint.worldPosition.x,
-        -fromJoint.worldPosition.y,
-        fromJoint.worldPosition.z
-      );
-
-      const endPos = new THREE.Vector3(
-        toJoint.worldPosition.x,
-        -toJoint.worldPosition.y,
-        toJoint.worldPosition.z
-      );
-
-      const distance = startPos.distanceTo(endPos);
-      if (distance < 0.01) {
+      // Use current joint mesh positions (local to skeletonGroup) to stay consistent when the group moves
+      const fromMesh = this.jointMeshes[fromJointId];
+      const toMesh = this.jointMeshes[toJointId];
+      if (!fromMesh || !toMesh || !fromMesh.visible || !toMesh.visible) {
         boneMesh.visible = false;
         return;
       }
 
-      // Position and orient the bone
+      const startPos = fromMesh.position.clone();
+      const endPos = toMesh.position.clone();
+
+      const dir = new THREE.Vector3().subVectors(endPos, startPos);
+      const distance = dir.length();
+      if (distance < 0.01) {
+        boneMesh.visible = false;
+        return;
+      }
+      dir.normalize();
+
+      // Position midpoint in local space
       const midPoint = new THREE.Vector3().addVectors(startPos, endPos).multiplyScalar(0.5);
       boneMesh.position.copy(midPoint);
       
-      // Scale the bone to the correct length
+      // Scale the bone to the correct length (geometry oriented along +Y)
       boneMesh.scale.set(1, distance, 1);
       
-      // Orient the bone
-      boneMesh.lookAt(endPos);
-      boneMesh.rotateX(Math.PI / 2);
+      // Orient the bone so its Y-axis aligns with dir
+      const up = new THREE.Vector3(0, 1, 0);
+      const quat = new THREE.Quaternion().setFromUnitVectors(up, dir);
+      boneMesh.quaternion.copy(quat);
 
       // Update material
       const avgVisibility = (fromJoint.visibility + toJoint.visibility) / 2;
@@ -370,7 +424,6 @@ export class ThreeSkeletonRenderer {
       (boneMesh.material as THREE.MeshBasicMaterial).opacity = avgVisibility;
     });
   }
-
 
   private clearSkeleton(): void {
     //console.log('🧹 Clearing existing skeleton meshes');
@@ -580,6 +633,44 @@ export class ThreeSkeletonRenderer {
     });
 
     return map;
+  }
+
+  /**
+   * Return visible bone segments as world-space start/end points with joint ids
+   */
+  getBoneWorldSegments(): Array<{ fromId: number; toId: number; start: THREE.Vector3; end: THREE.Vector3 }> {
+    const segments: Array<{ fromId: number; toId: number; start: THREE.Vector3; end: THREE.Vector3 }> = [];
+    if (!this.boneMeshes || this.boneMeshes.length === 0) return segments;
+
+    // Build a quick lookup for joint world positions
+    const jointWorld = new Map<number, THREE.Vector3>();
+    this.jointMeshes.forEach((mesh, index) => {
+      if (!mesh.visible) return;
+      const id = typeof mesh.userData.jointId === 'number' ? mesh.userData.jointId : index;
+      const wp = new THREE.Vector3();
+      mesh.getWorldPosition(wp);
+      jointWorld.set(id, wp);
+    });
+
+    this.boneMeshes.forEach((bone) => {
+      if (!bone.visible) return;
+      const fromId: number = bone.userData.fromJoint;
+      const toId: number = bone.userData.toJoint;
+      const start = jointWorld.get(fromId);
+      const end = jointWorld.get(toId);
+      if (start && end) {
+        segments.push({ fromId, toId, start: start.clone(), end: end.clone() });
+      }
+    });
+
+    return segments;
+  }
+
+  /**
+   * Get the bone collision radius (in world units) used by the renderer's bone geometry
+   */
+  getBoneRadius(): number {
+    return this.options.boneThickness; // Cylinder radius used to build bone geometry
   }
 
   /**
