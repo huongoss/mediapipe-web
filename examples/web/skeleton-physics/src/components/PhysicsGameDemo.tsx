@@ -5,6 +5,13 @@ import { ThreeSkeletonRenderer } from '../renderers/ThreeSkeletonRenderer';
 import { PhysicsSystem } from '../physics/PhysicsSystem';
 import { SkeletonPhysicsAdapter } from '../physics/SkeletonPhysicsAdapter';
 import { FocusManager, type PausableComponent } from '../utils/FocusManager';
+import { generateBallSpawn } from '../game/BallSpawner';
+import { createCollisionEffect, type CollisionEffect } from '../game/CollisionEffects';
+
+// Pool and ball constants
+const MAX_BALLS = 10;
+const BALL_RADIUS = 0.08;
+const OFFSCREEN_POS = new THREE.Vector3(0, -10, 0);
 
 interface PhysicsGameDemoProps {
   modelPath: string;
@@ -22,7 +29,10 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
   const rendererRef = useRef<ThreeSkeletonRenderer | null>(null);
   const physicsSystemRef = useRef<PhysicsSystem | null>(null);
   const skeletonPhysicsRef = useRef<SkeletonPhysicsAdapter | null>(null);
-  const gameObjectsRef = useRef<Array<{ rigidBody: any; mesh: THREE.Mesh }>>([]);
+  const gameObjectsRef = useRef<Array<{ rigidBody: any; mesh: THREE.Mesh; active?: boolean }>>([]);
+  const ballPoolRef = useRef<Array<{ rigidBody: any; mesh: THREE.Mesh; active: boolean }>>([]);
+  const ballGeometryRef = useRef<THREE.SphereGeometry | null>(null);
+  const collisionEffectsRef = useRef<CollisionEffect[]>([]);
   
   const [gameMode, setGameMode] = useState<'visualization' | 'physics'>('visualization');
   const [score, setScore] = useState(0);
@@ -303,88 +313,66 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     const scene = rendererRef.current.getScene();
     const skeletonPhysics = skeletonPhysicsRef.current;
 
-    console.log('🎮 Creating more reachable game objects...');
+    console.log('🎮 Initializing ball pool...');
 
-    // Create balls that are more reachable - closer to the user and at various heights
-    for (let i = 0; i < 8; i++) {
-      // Create balls in a more reachable area around the user
-      const angle = (i / 8) * Math.PI * 2; // Distribute in a circle
-      const radius = 0.3 + Math.random() * 0.4; // Distance from center: 0.3-0.7m
-      const height = 0.2 + Math.random() * 1.2; // Height: 0.2-1.4m
-      
-      const position = new THREE.Vector3(
-        Math.cos(angle) * radius, // X: circular distribution
-        height,                   // Y: random height within reach
-        Math.sin(angle) * radius * 0.5 // Z: closer to camera (shallower depth)
-      );
+    // Shared geometry (created once)
+    if (!ballGeometryRef.current) {
+      ballGeometryRef.current = new THREE.SphereGeometry(BALL_RADIUS, 16, 12);
+    }
 
-      console.log(`🎯 Ball ${i} initial position:`, { x: position.x.toFixed(3), y: position.y.toFixed(3), z: position.z.toFixed(3) });
-
-      // Create visual representation - make balls slightly larger and more colorful
-      const geometry = new THREE.SphereGeometry(0.08, 16, 12);
-      const hue = i / 8; // Different color for each ball
+    // Helper to create a pooled ball (inactive by default)
+    const createPooledBall = (index: number) => {
+      const hue = index / MAX_BALLS;
       const material = new THREE.MeshBasicMaterial({ 
         color: new THREE.Color().setHSL(hue, 0.8, 0.6),
       });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.position.copy(position);
+      const mesh = new THREE.Mesh(ballGeometryRef.current!, material);
+      mesh.visible = false;
+      mesh.position.copy(OFFSCREEN_POS);
       scene.add(mesh);
 
-      // Create physics body with appropriate size
-      try {
-        const { rigidBody } = skeletonPhysics.addPhysicsObject(
-          position,
-          'sphere',
-          new THREE.Vector3(0.08, 0, 0), // Slightly larger radius
-          0.02 // Heavier for better physics interaction
-        );
-
-        console.log(`✅ Ball ${i} physics body created successfully`);
-        gameObjectsRef.current.push({ rigidBody, mesh });
-
-      } catch (error) {
-        console.error(`❌ Failed to create physics body for ball ${i}:`, error);
-      }
-    }
-
-    // Add a few floating balls at different heights for variety
-    for (let i = 0; i < 3; i++) {
-      const position = new THREE.Vector3(
-        (Math.random() - 0.5) * 1.0,  // X: -0.5 to 0.5m
-        0.8 + Math.random() * 0.6,   // Y: 0.8 to 1.4m (head/shoulder height)
-        -0.2 + Math.random() * 0.4   // Z: -0.2 to 0.2m (very close)
+      // Create physics body offscreen
+      const { rigidBody } = skeletonPhysics.addPhysicsObject(
+        OFFSCREEN_POS.clone(),
+        'sphere',
+        new THREE.Vector3(BALL_RADIUS, 0, 0),
+        0.05
       );
 
-      console.log(`🎈 Floating ball ${i} position:`, position);
+      return { rigidBody, mesh, active: false };
+    };
 
-      const geometry = new THREE.SphereGeometry(0.06, 12, 8);
-      const material = new THREE.MeshLambertMaterial({ 
-        color: new THREE.Color().setHSL(0.1 + i * 0.3, 0.9, 0.7),
-        transparent: true,
-        opacity: 0.8
-      });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.position.copy(position);
-      mesh.castShadow = true;
-      scene.add(mesh);
-
-      try {
-        const { rigidBody } = skeletonPhysics.addPhysicsObject(
-          position,
-          'sphere',
-          new THREE.Vector3(0.06, 0, 0),
-          0.1 // Lighter for easy hitting
-        );
-
-        gameObjectsRef.current.push({ rigidBody, mesh });
-        console.log(`✅ Floating ball ${i} physics body created`);
-      } catch (error) {
-        console.error(`❌ Failed to create floating ball ${i}:`, error);
+    // Build pool if empty
+    if (ballPoolRef.current.length === 0) {
+      for (let i = 0; i < MAX_BALLS; i++) {
+        const ball = createPooledBall(i);
+        ballPoolRef.current.push(ball);
       }
+      console.log(`✅ Created ball pool with ${ballPoolRef.current.length} balls`);
     }
 
-    console.log(`✅ Created ${gameObjectsRef.current.length} game objects total`);
+    // Helper to spawn/activate a ball from the pool with initial velocity toward center
+    const activateBall = (ballIndex: number) => {
+      const ball = ballPoolRef.current[ballIndex];
+      if (!ball) return;
+      const { position, velocity } = generateBallSpawn();
+      ball.active = true;
+      ball.mesh.visible = true;
+      ball.mesh.position.copy(position);
+      ball.rigidBody.setTranslation({ x: position.x, y: position.y, z: 0 }, true);
+      ball.rigidBody.setLinvel(velocity, true);
+    };
 
+    // Spawn initial set of balls (reuse from pool) coming from random directions
+    console.log('🎯 Spawning initial balls from pool...');
+    for (let i = 0; i < Math.min(8, MAX_BALLS); i++) {
+      activateBall(i);
+    }
+
+    // Keep compatibility with existing refs by mirroring pool into gameObjectsRef
+    gameObjectsRef.current = ballPoolRef.current;
+
+    console.log('✅ Ball pool initialized and initial balls activated');
   };
 
   const startTracking = async () => {
@@ -427,19 +415,26 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
 
   const resetGame = () => {
     setScore(0);
-    
-    // Reset all game objects
-    gameObjectsRef.current.forEach(({ rigidBody }) => {
-      rigidBody.setTranslation({ 
-        x: (Math.random() - 0.5) * 2, 
-        y: Math.random() * 2 + 1, 
-        z: 0 
-      }, true);
-      rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+
+    // Reset all balls by respawning from random directions
+    ballPoolRef.current.forEach((ball) => {
+      const { position, velocity } = generateBallSpawn();
+      ball.active = true;
+      ball.mesh.visible = true;
+      ball.mesh.position.copy(position);
+      ball.rigidBody.setTranslation({ x: position.x, y: position.y, z: 0 }, true);
+      ball.rigidBody.setLinvel(velocity, true);
     });
   };
 
   const cleanup = () => {
+    // Dispose pending collision effects
+    const scene = rendererRef.current?.getScene();
+    collisionEffectsRef.current.forEach((fx) => {
+      try { fx.dispose(); } catch {}
+    });
+    collisionEffectsRef.current = [];
+
     if (skeletonProviderRef.current) {
       skeletonProviderRef.current.dispose();
     }
@@ -459,20 +454,39 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     if (!systemsReady) return; // Start as soon as systems are ready, not just when tracking
 
     let animationId: number;
+    let lastTime = performance.now();
 
-    const animate = () => {
+    const animate = (time: number) => {
+      const deltaSeconds = Math.min(0.05, Math.max(0, (time - lastTime) / 1000));
+      lastTime = time;
+
       try {
         // Step physics simulation once per frame
         if (skeletonPhysicsRef.current) {
           skeletonPhysicsRef.current.step();
         }
 
-        // Update all game objects from physics simulation
-        if (gameObjectsRef.current.length > 0) {
+        // Update active collision effects
+        if (rendererRef.current) {
+          const fxList = collisionEffectsRef.current;
+          for (let i = fxList.length - 1; i >= 0; i--) {
+            const fx = fxList[i];
+            fx.update(deltaSeconds);
+            if (fx.done) {
+              try { fx.dispose(); } catch {}
+              fxList.splice(i, 1);
+            }
+          }
+        }
+
+        // Use pool for updates
+        const activeBalls = ballPoolRef.current;
+        if (activeBalls.length > 0) {
           // Get skeleton joint positions from renderer for collision detection
           const skeletonJointPositions = rendererRef.current?.getJointWorldPositions() || new Map();
           
-          gameObjectsRef.current.forEach(({ rigidBody, mesh }, ballIndex) => {
+          activeBalls.forEach(({ rigidBody, mesh, active }, ballIndex) => {
+            if (!active) return;
             try {
               const pos = rigidBody.translation();
               const rot = rigidBody.rotation();
@@ -485,52 +499,55 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
               // Check for collisions with skeleton joints (only when tracking is active)
               if (isDetectionActive && skeletonJointPositions.size > 0) {
                 const ballPosition = new THREE.Vector3(pos.x, pos.y, pos.z);
-                const ballRadius = 0.08;
+                const ballRadius = BALL_RADIUS;
                 const jointRadius = 0.08;
                 const collisionDistance = ballRadius + jointRadius;
 
-                // Check collision with each skeleton joint
                 skeletonJointPositions.forEach((jointPos) => {
                   const distance = ballPosition.distanceTo(jointPos);
-                  
                   if (distance < collisionDistance) {
                     const currentVelocity = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z);
-                    
-                    if (currentVelocity > 0.5) {
+                    if (currentVelocity > 0.05) {
                       setScore(prev => prev + 1);
-                      
+
                       // Apply realistic hit impulse
                       const hitDirection = new THREE.Vector3()
                         .subVectors(ballPosition, jointPos)
                         .normalize()
                         .multiplyScalar(3.0);
-                      
                       rigidBody.applyImpulse({
                         x: hitDirection.x,
                         y: hitDirection.y + 1.0,
                         z: hitDirection.z
                       }, true);
-                      
-                      // Visual feedback
+
+                      // Visual collision effect at the contact point on the ball surface
+                      const dir = new THREE.Vector3().subVectors(ballPosition, jointPos).normalize();
+                      const contactPoint = ballPosition.clone().addScaledVector(dir, -ballRadius);
+                      const scene = rendererRef.current?.getScene();
+                      if (scene) {
+                        const fx = createCollisionEffect(scene, contactPoint, {
+                          color: (mesh.material as THREE.MeshBasicMaterial).color.getHex(),
+                        });
+                        collisionEffectsRef.current.push(fx);
+                      }
+
+                      // Temporary color flash for the ball
                       const originalColor = (mesh.material as THREE.MeshBasicMaterial).color.clone();
                       (mesh.material as THREE.MeshBasicMaterial).color.setHex(0xffffff);
                       setTimeout(() => {
                         (mesh.material as THREE.MeshBasicMaterial).color.copy(originalColor);
-                      }, 200);
+                      }, 120);
                     }
                   }
                 });
               }
 
-              // Reset ball if it falls too far
+              // Reuse ball by respawning when out of bounds
               if (pos.y < -3) {
-                const newPos = {
-                  x: (Math.random() - 0.5) * 1.5,
-                  y: 1.5 + Math.random() * 0.5,
-                  z: (Math.random() - 0.5) * 0.8
-                };
-                rigidBody.setTranslation(newPos, true);
-                rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+                const { position: newPosition, velocity: newVelocity } = generateBallSpawn();
+                rigidBody.setTranslation({ x: newPosition.x, y: newPosition.y, z: 0 }, true);
+                rigidBody.setLinvel(newVelocity, true);
               }
             } catch (error) {
               console.error(`❌ Error updating ball ${ballIndex}:`, error);

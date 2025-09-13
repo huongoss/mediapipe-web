@@ -40,10 +40,6 @@ export class ThreeSkeletonRenderer {
   private defaultJointMaterial: THREE.MeshBasicMaterial | null = null;
   private defaultBoneMaterial: THREE.MeshBasicMaterial | null = null;
 
-  // Movement range visualization
-  private movementRangeBox: THREE.LineSegments | null = null;
-  private movementRangeWireframe: THREE.Mesh | null = null;
-
   constructor(container: HTMLElement|HTMLCanvasElement, options: SkeletonRenderOptions = {}) {
     this.options = {
       jointSize: 0.02,
@@ -284,16 +280,6 @@ export class ThreeSkeletonRenderer {
     this.updateJointPositions(skeletonData.joints);
     this.updateBonePositions(skeletonData.joints);
 
-    // Update movement range visualization
-    if (skeletonData.movementRange) {
-      this.updateMovementRangeVisualization(skeletonData.movementRange);
-    }
-
-    if (this.options.showJointLabels) {
-      //console.log('🏷️ Rendering joint labels...');
-      this.renderJointLabels(skeletonData.joints);
-    }
-
     //console.log('✅ Skeleton visualization updated');
   }
 
@@ -385,137 +371,6 @@ export class ThreeSkeletonRenderer {
     });
   }
 
-  private updateMovementRangeVisualization(range: any): void {
-    //console.log('📦 Updating movement range visualization');
-    
-    // Remove existing movement range visualization
-    this.clearMovementRange();
-
-    // Add corner markers for better depth perception
-    const cornerGeometry = new THREE.SphereGeometry(0.01, 8, 6);
-    const cornerMaterial = new THREE.MeshBasicMaterial({
-      color: 0x00ff88,
-      transparent: true,
-      opacity: 0.8
-    });
-
-    // Add corner spheres at the 8 corners of the bounding box
-    const halfSize = {
-      x: range.size.x / 2,
-      y: range.size.y / 2,
-      z: range.size.z / 2
-    };
-
-    const corners = [
-      [-halfSize.x, -halfSize.y, -halfSize.z],
-      [+halfSize.x, -halfSize.y, -halfSize.z],
-      [-halfSize.x, +halfSize.y, -halfSize.z],
-      [+halfSize.x, +halfSize.y, -halfSize.z],
-      [-halfSize.x, -halfSize.y, +halfSize.z],
-      [+halfSize.x, -halfSize.y, +halfSize.z],
-      [-halfSize.x, +halfSize.y, +halfSize.z],
-      [+halfSize.x, +halfSize.y, +halfSize.z]
-    ];
-
-    corners.forEach(([x, y, z]) => {
-      const corner = new THREE.Mesh(cornerGeometry, cornerMaterial.clone());
-      corner.position.set(
-        range.center.x + x,
-        -range.center.y - y, // Flip Y for correct orientation
-        range.center.z + z
-      );
-      this.scene.add(corner);
-    });
-
-    // Add range info text
-    this.addRangeInfoText(range);
-
-    this.scene.add(this.movementRangeWireframe);
-    this.scene.add(this.movementRangeBox);
-
-    // console.log('✅ Movement range visualization updated:', {
-    //   center: range.center,
-    //   size: range.size
-    // });
-  }
-
-  private addRangeInfoText(range: any): void {
-    // Create a text sprite showing range dimensions
-    const canvas = document.createElement('canvas');
-    const context = canvas.getContext('2d')!;
-    canvas.width = 300;
-    canvas.height = 100;
-    
-    // Background
-    context.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    
-    // Text
-    context.fillStyle = '#00ff88';
-    context.font = 'bold 14px Arial';
-    context.textAlign = 'left';
-    
-    const sizeX = (range.size.x * 100).toFixed(0); // Convert to cm
-    const sizeY = (range.size.y * 100).toFixed(0);
-    const sizeZ = (range.size.z * 100).toFixed(0);
-    
-    context.fillText('Movement Range:', 10, 20);
-    context.fillText(`Width: ${sizeX}cm`, 10, 40);
-    context.fillText(`Height: ${sizeY}cm`, 10, 60);
-    context.fillText(`Depth: ${sizeZ}cm`, 10, 80);
-
-    const texture = new THREE.CanvasTexture(canvas);
-    const spriteMaterial = new THREE.SpriteMaterial({ 
-      map: texture,
-      transparent: true
-    });
-    const sprite = new THREE.Sprite(spriteMaterial);
-    
-    // Position the text above the movement range
-    sprite.position.set(
-      range.center.x,
-      -range.center.y + range.size.y / 2 + 0.3,
-      range.center.z
-    );
-    
-    sprite.scale.set(0.3, 0.1, 1);
-    this.scene.add(sprite);
-  }
-
-  private clearMovementRange(): void {
-    // Remove existing movement range visualizations
-    if (this.movementRangeBox) {
-      this.scene.remove(this.movementRangeBox);
-      this.movementRangeBox.geometry.dispose();
-      (this.movementRangeBox.material as THREE.Material).dispose();
-      this.movementRangeBox = null;
-    }
-
-    if (this.movementRangeWireframe) {
-      this.scene.remove(this.movementRangeWireframe);
-      this.movementRangeWireframe.geometry.dispose();
-      (this.movementRangeWireframe.material as THREE.Material).dispose();
-      this.movementRangeWireframe = null;
-    }
-
-    // Remove corner markers and text sprites
-    const objectsToRemove: THREE.Object3D[] = [];
-    this.scene.traverse((object) => {
-      if (object.userData.isMovementRangeElement) {
-        objectsToRemove.push(object);
-      }
-    });
-
-    objectsToRemove.forEach(obj => {
-      this.scene.remove(obj);
-      if (obj instanceof THREE.Mesh) {
-        obj.geometry.dispose();
-        (obj.material as THREE.Material).dispose();
-      } else if (obj instanceof THREE.Sprite) {
-        (obj.material as THREE.SpriteMaterial).dispose();
-      }
-    });
-  }
 
   private clearSkeleton(): void {
     //console.log('🧹 Clearing existing skeleton meshes');
@@ -537,39 +392,6 @@ export class ThreeSkeletonRenderer {
     //console.log('✅ Skeleton meshes cleared');
   }
 
-  private renderJointLabels(joints: SkeletonJoint[]): void {
-    joints.forEach(joint => {
-      if (joint.visibility < 0.5) return;
-
-      const canvas = document.createElement('canvas');
-      const context = canvas.getContext('2d')!;
-      canvas.width = 128;
-      canvas.height = 32;
-      
-      context.fillStyle = 'rgba(0, 0, 0, 0.7)';
-      context.fillRect(0, 0, canvas.width, canvas.height);
-      
-      context.fillStyle = 'white';
-      context.font = '12px Arial';
-      context.textAlign = 'center';
-      context.fillText(joint.name, canvas.width / 2, canvas.height / 2 + 4);
-
-      const texture = new THREE.CanvasTexture(canvas);
-      const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
-      const sprite = new THREE.Sprite(spriteMaterial);
-      
-      sprite.position.set(
-        joint.worldPosition.x,
-        -joint.worldPosition.y + 0.05,
-        joint.worldPosition.z
-      );
-      
-      sprite.scale.set(0.1, 0.025, 1);
-
-      this.jointLabels.push(sprite);
-      this.skeletonGroup.add(sprite);
-    });
-  }
   /**
    * Create default T-pose skeleton data
    */
@@ -829,7 +651,6 @@ export class ThreeSkeletonRenderer {
 
   dispose(): void {
     this.clearSkeleton();
-    this.clearMovementRange();
     
     // Dispose of reusable geometries and materials
     if (this.jointGeometry) {

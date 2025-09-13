@@ -12,6 +12,10 @@ export class PhysicsSystem {
   private objects: Map<string, PhysicsObject> = new Map();
   private isInitialized = false;
 
+  // Base simulation timestep (seconds) and default time scale (10x slower)
+  private readonly baseTimestep = 1.0 / 60.0;
+  private timeScale = 0.1; // 10x slower than current
+
   async initialize(): Promise<void> {
     console.log('🔧 PhysicsSystem: Initializing...');
     
@@ -22,6 +26,9 @@ export class PhysicsSystem {
       // Create physics world with gravity
       this.world = new RAPIER.World(this.gravity);
       console.log('✅ Physics world created with gravity:', this.gravity);
+
+      // Apply default time scale (slower physics)
+      this.applyTimeScale();
       
       this.isInitialized = true;
       console.log('✅ PhysicsSystem initialization complete');
@@ -30,6 +37,53 @@ export class PhysicsSystem {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       throw new Error(`PhysicsSystem initialization failed: ${errorMessage}`);
     }
+  }
+
+  /**
+   * Apply the current timeScale to the world's timestep/integration parameters.
+   */  
+  private applyTimeScale(): void {
+    if (!this.world) return;
+
+    const targetDt = this.baseTimestep * this.timeScale; // smaller dt => slower per real-time frame
+    const w: any = this.world as any;
+
+    try {
+      if (typeof w.timestep === 'number') {
+        w.timestep = targetDt;
+        console.log('🕒 Physics timestep set via world.timestep:', w.timestep);
+        return;
+      }
+      // Some versions expose integrationParameters with a dt field
+      if (w.integrationParameters) {
+        if (typeof w.integrationParameters.dt === 'number') {
+          const old = w.integrationParameters.dt;
+          w.integrationParameters.dt = targetDt;
+          console.log('🕒 Physics timestep set via integrationParameters.dt:', targetDt, '(was', old, ')');
+          return;
+        }
+        if (typeof w.integrationParameters.set_dt === 'function') {
+          w.integrationParameters.set_dt(targetDt);
+          console.log('🕒 Physics timestep set via integrationParameters.set_dt:', targetDt);
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('⚠️ Failed to set timestep explicitly:', e);
+    }
+
+    // Fallback: scale gravity as a coarse slowing mechanism if timestep cannot be changed
+    const scaled = { x: this.gravity.x * this.timeScale, y: this.gravity.y * this.timeScale, z: this.gravity.z * this.timeScale };
+    this.setGravity(scaled);
+    console.warn('⚠️ Falling back to gravity scaling for slower physics:', scaled);
+  }
+
+  /**
+   * Change time scale (1.0 = normal, 0.1 = 10x slower, 2.0 = 2x faster)
+   */
+  setTimeScale(scale: number): void {
+    this.timeScale = Math.max(0.001, scale);
+    this.applyTimeScale();
   }
 
   /**
