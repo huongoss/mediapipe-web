@@ -1,3 +1,21 @@
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden; /* Disable page scrollbars */
+}
+
+/* Hide native scrollbars across browsers */
+body {
+  -ms-overflow-style: none; /* IE and Edge */
+  scrollbar-width: none;    /* Firefox */
+}
+body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;            /* Chrome, Safari */
+}
+
 .physics-game-demo {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
   height: 100vh;

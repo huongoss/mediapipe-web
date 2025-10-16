@@ -8,6 +8,18 @@ import { FocusManager, type PausableComponent } from '../utils/FocusManager';
 import { generateBallSpawn } from '../game/BallSpawner';
 import { createCollisionEffect, type CollisionEffect } from '../game/CollisionEffects';
 import { AudioManager } from '../audio/AudioManager';
+import { Leaderboard } from '../ui/Leaderboard';
+import { SettingsPanel } from '../ui/SettingsPanel';
+import { loadScores, saveScore } from '../utils/LeaderboardStore';
+import { captureCanvasWithHUD, shareImage } from '../utils/Screenshot';
+import { ConfettiOverlay, type ConfettiOverlayHandle } from '../ui/ConfettiOverlay';
+import { FabRadialMenu } from '../ui/FabRadialMenu';
+import { HomeOverlay, PauseOverlay, ResultOverlay } from '../ui/Overlays';
+import { TopHUD } from '../ui/TopHUD';
+import { TrailParticles } from '../game/TrailParticles.ts';
+import { StoryMode } from '../story/StoryMode';
+import { StoryHUD } from '../ui/StoryHUD';
+import { StoryEnvironment } from '../story/StoryEnvironment';
 
 // Pool and ball constants
 const MAX_BALLS = 20;
@@ -34,17 +46,31 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
   const ballPoolRef = useRef<Array<{ rigidBody: any; mesh: THREE.Mesh; active: boolean }>>([]);
   const ballGeometryRef = useRef<THREE.SphereGeometry | null>(null);
   const collisionEffectsRef = useRef<CollisionEffect[]>([]);
+  const trailParticlesRef = useRef<TrailParticles | null>(null);
   const audioRef = useRef<AudioManager | null>(null);
+  const confettiRef = useRef<ConfettiOverlayHandle|null>(null);
   
-  const [gameMode, setGameMode] = useState<'visualization' | 'physics'>('visualization');
   const [score, setScore] = useState(0);
-  const [showInstructions, setShowInstructions] = useState(true);
   const [systemsReady, setSystemsReady] = useState(false);
   const [isDetectionActive, setIsDetectionActive] = useState(false);
   const [showSkeletonOverlay, setShowSkeletonOverlay] = useState(false);
   const skeletonOverlayRef = useRef<any>(null);
   const focusManagerRef = useRef<FocusManager | null>(null);
   const [isPaused, setIsPaused] = useState(false);
+  const [uiOpenLeaderboard, setUiOpenLeaderboard] = useState(false);
+  const [uiOpenSettings, setUiOpenSettings] = useState(false);
+  const [bestScore, setBestScore] = useState(0);
+  const [multiplier, setMultiplier] = useState(1);
+  const [settings, setSettings] = useState({ music:false, sfx:true, overlay:false });
+  const [scores, setScores] = useState(loadScores());
+  const [toast, setToast] = useState<string | null>(null);
+  const [showHome, setShowHome] = useState(true);
+  const [showResult, setShowResult] = useState(false);
+  const [isStoryMode, setIsStoryMode] = useState(false);
+  const storyModeRef = useRef<StoryMode | null>(null);
+  const [storySnapshot, setStorySnapshot] = useState<any | null>(null);
+  const prevStoryChapterRef = useRef<number>(0);
+  const storyEnvRef = useRef<StoryEnvironment | null>(null);
 
   // Create pausable wrappers for all components
   const pausableComponents = useRef<PausableComponent[]>([]);
@@ -52,6 +78,13 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
   const prevBoneCentersRef = useRef<Map<string, THREE.Vector3>>(new Map());
   // Track previous root X to compute body lateral velocity
   const prevRootXRef = useRef<number | null>(null);
+
+  // Light-weight combo mechanic: bump on each hit and decay slowly
+  useEffect(()=>{
+    if (multiplier <= 1) return;
+    const id = setInterval(()=> setMultiplier(m=> Math.max(1, +(m - 0.02).toFixed(2))), 200);
+    return ()=> clearInterval(id);
+  }, [multiplier]);
 
   useEffect(() => {
     if(!canvasRef.current) return;
@@ -107,7 +140,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
         const renderer = new ThreeSkeletonRenderer(
           canvasRef.current, {
           showJointLabels: false,
-          physicsMode: gameMode === 'physics', // Enable physics mode visualization
+          physicsMode: true, // Enable physics mode visualization
           physicsJointColor: '#ffaa00', // Orange color for physics joints
           physicsJointSize: 0.08 // Large collision spheres
         });
@@ -151,6 +184,11 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
         skeletonProvider.subscribe((skeletonData) => {
           // Always update renderer with latest skeleton. Physics system doesn't own skeleton.
           renderer.updateSkeleton(skeletonData);
+          // Feed story recognizer if active
+          if (storyModeRef.current) {
+            storyModeRef.current.updateSkeleton(skeletonData);
+            setStorySnapshot(storyModeRef.current.getSnapshot());
+          }
         });
         console.log('✅ Skeleton subscription set up');
 
@@ -161,6 +199,12 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
         console.log('🎮 Creating game objects...');
         // Add some interactive game objects
         createGameObjects();
+
+        // Create particle trail system
+        if (renderer.getScene) {
+          const scene = renderer.getScene();
+          trailParticlesRef.current = new TrailParticles(scene, 1000);
+        }
         
         setSystemsReady(true);
         console.log('🎉 Demo initialization complete!');
@@ -428,10 +472,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     }
   };
 
-  const toggleGameMode = () => {
-    setGameMode(prev => prev === 'visualization' ? 'physics' : 'visualization');
-  };
-
+  // Save score on reset if it beats best
   const resetGame = () => {
     setScore(0);
 
@@ -444,6 +485,14 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
       ball.rigidBody.setTranslation({ x: position.x, y: position.y, z: 0 }, true);
       ball.rigidBody.setLinvel(velocity, true);
     });
+
+    const name = localStorage.getItem('player_name') || 'Player';
+    if (score > 0) {
+      saveScore({ name, score, date: Date.now() });
+      setScores(loadScores());
+    }
+    setScore(0);
+    setMultiplier(1);
   };
 
   const cleanup = () => {
@@ -467,6 +516,9 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     }
     audioRef.current?.dispose();
     audioRef.current = null;
+    // story environment
+    storyEnvRef.current?.dispose();
+    storyEnvRef.current = null;
   };
 
   // Single unified animation loop that handles everything
@@ -502,6 +554,9 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
             }
           }
         }
+
+        // Update particle trails
+        trailParticlesRef.current?.update(deltaSeconds);
 
         // Compute root (skeleton group) lateral velocity so bone speeds are relative to body motion
         const rootGroup = rendererRef.current?.getSkeletonGroup?.();
@@ -582,7 +637,22 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
                     z: hitDirection.z
                   }, true);
 
-                  setScore(prev => prev + 1);
+                  setScore(prev => {
+                    const next = prev + 1;
+                    // Milestones
+                    if (next % 25 === 0) {
+                      confettiRef.current?.burst?.();
+                      setToast('Milestone! 🎉');
+                    }
+                    // Surpass best
+                    if (next > bestScore) {
+                      confettiRef.current?.burst?.(undefined, 80, 80);
+                    }
+                    return next;
+                  });
+                  // UX feedback
+                  setMultiplier(m=> +(Math.min(3, m + 0.05).toFixed(2)));
+                  setToast('Nice hit! ⚡');
 
                   // Audio: pan by x, level by bone speed
                   const pan = THREE.MathUtils.clamp(ballPosition.x / 2.0, -1, 1);
@@ -603,12 +673,19 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
                     collisionEffectsRef.current.push(fx);
                   }
 
+                  // Trails: burst small particles from contact point
+                  trailParticlesRef.current?.burst(contactPoint, new THREE.Color((mesh.material as THREE.MeshBasicMaterial).color.getHex()), 40);
+
                   // Temporary color flash for the ball
                   const originalColor = (mesh.material as THREE.MeshBasicMaterial).color.clone();
                   (mesh.material as THREE.MeshBasicMaterial).color.setHex(0xffffff);
                   setTimeout(() => {
                     (mesh.material as THREE.MeshBasicMaterial).color.copy(originalColor);
                   }, 120);
+
+                  // UX: bump multiplier slightly and toast
+                  setMultiplier(m=> +(Math.min(3, m + 0.05).toFixed(2)));
+                  setToast('Nice hit! ⚡');
 
                   // Only handle first segment collision per frame for this ball
                   break;
@@ -644,7 +721,23 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     };
   }, [systemsReady, isDetectionActive]);
 
-  // Toggle skeleton overlay on video
+  useEffect(()=>{
+    const top = scores[0]?.score ?? 0;
+    setBestScore(Math.max(bestScore, top));
+  }, [scores]);
+
+  const handleShare = async () => {
+    if (!canvasRef.current) return;
+    const blob = await captureCanvasWithHUD(canvasRef.current);
+    await shareImage(blob, `I scored ${score} in Skeleton Physics!`);
+  };
+
+  const handleOpenLeaderboard = () => setUiOpenLeaderboard(true);
+  const handleCloseLeaderboard = () => setUiOpenLeaderboard(false);
+  // open settings currently triggered via UI elsewhere; keep close handler only
+  const handleCloseSettings = () => setUiOpenSettings(false);
+
+  // Toggle skeleton overlay on video -> also sync with settings
   const toggleSkeletonOverlay = async () => {
     if (!videoRef.current || !skeletonProviderRef.current) return;
 
@@ -658,6 +751,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
       }
       skeletonOverlayRef.current = null;
       setShowSkeletonOverlay(false);
+      setSettings(s => ({...s, overlay:false}));
     } else {
       // Enable overlay
       console.log('🟢 Enabling skeleton overlay');
@@ -672,6 +766,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
         });
         skeletonOverlayRef.current = overlay;
         setShowSkeletonOverlay(true);
+        setSettings(s => ({...s, overlay:true}));
         console.log('✅ Skeleton overlay enabled');
       } catch (error) {
         console.error('❌ Failed to enable skeleton overlay:', error);
@@ -679,87 +774,151 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     }
   };
 
+  // Pause/resume handler toggling all registered pausable components
+  const togglePause = () => {
+    if (isPaused) {
+      pausableComponents.current.forEach(c => c.resume?.());
+      setIsPaused(false);
+    } else {
+      pausableComponents.current.forEach(c => c.pause?.());
+      setIsPaused(true);
+    }
+  };
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        togglePause();
+      } else if (e.key === 'v' || e.key === 'V') {
+        toggleSkeletonOverlay();
+      } else if (e.key === 'c' || e.key === 'C') {
+        isDetectionActive ? stopTracking() : startTracking();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isDetectionActive, isPaused]);
+
+  // Toast auto-hide
+  useEffect(()=>{
+    if (!toast) return;
+    const t = setTimeout(()=> setToast(null), 800);
+    return ()=> clearTimeout(t);
+  }, [toast]);
+
+  // Story chapter advance feedback
+  useEffect(()=>{
+    if (!isStoryMode || !storySnapshot) return;
+    const idx = storySnapshot.chapterIndex ?? 0;
+    if (idx > prevStoryChapterRef.current) {
+      confettiRef.current?.burst?.(undefined, 120, 100);
+      setToast('Chapter advanced ✨');
+      prevStoryChapterRef.current = idx;
+    }
+    // Update environment visuals per snapshot
+    storyEnvRef.current?.updateByStory(storySnapshot);
+  }, [isStoryMode, storySnapshot]);
+
+  // Start from home screen
+  useEffect(()=>{
+    if (showHome) {
+      // ensure paused state
+      if (!isPaused) {
+        pausableComponents.current.forEach(c => c.pause?.());
+        setIsPaused(true);
+      }
+    }
+  }, [showHome]);
+
+  const onStartGame = async () => {
+    setShowHome(false);
+    if (!isDetectionActive) await startTracking();
+    togglePause(); // resume
+  };
+
+  // When resetting after a result, show home again
+  const onPlayAgain = () => {
+    setShowResult(false);
+    resetGame();
+    if (!isDetectionActive) startTracking();
+  };
+
+  // Show result overlay on big milestone (optional hook for future end-state)
+  useEffect(()=>{
+    if (score>0 && score % 100 === 0) {
+      setShowResult(true);
+    }
+  }, [score]);
+
+  const fabActions = [
+    { id:'pause', label: isPaused? 'Resume':'Pause', onClick: ()=> togglePause(), emoji: isPaused? '▶️':'⏸️' },
+    { id:'camera', label: isDetectionActive? 'Stop Camera':'Start Camera', onClick: ()=> isDetectionActive? stopTracking(): startTracking(), emoji:'📷' },
+    { id:'overlay', label: showSkeletonOverlay? 'Hide 2D':'Show 2D', onClick: ()=> toggleSkeletonOverlay(), emoji:'🧩' },
+    { id:'restart', label:'Restart', onClick: ()=> resetGame(), emoji:'🔁' },
+    { id:'share', label:'Share', onClick: ()=> handleShare(), emoji:'📣' },
+  ];
+
+  // Render
   return (
     <div className="physics-game-demo">
+      {/* Fullscreen overlays */}
+      {showHome && <HomeOverlay onStart={onStartGame} onLeaderboard={handleOpenLeaderboard} onStory={()=>{
+        setIsStoryMode(true);
+        // init story immediately
+        storyModeRef.current = new StoryMode();
+        setStorySnapshot(storyModeRef.current.getSnapshot());
+        prevStoryChapterRef.current = 0;
+        if (rendererRef.current && !storyEnvRef.current) {
+          storyEnvRef.current = new StoryEnvironment(rendererRef.current.getScene());
+        }
+        onStartGame();
+      }} />}
+      {isPaused && !showHome && !showResult && <PauseOverlay onResume={togglePause} onRestart={resetGame} />}
+      {showResult && <ResultOverlay score={score} best={bestScore} onShare={handleShare} onPlayAgain={onPlayAgain} />}
+
+      {/* Confetti overlay */}
+      <ConfettiOverlay ref={confettiRef as any} />
+
       {/* Full-window 3D canvas */}
-      <div 
-        ref={canvasContainerRef}
-        className="canvas-container">
+      <div ref={canvasContainerRef} className="canvas-container">
         <canvas ref={canvasRef}/>
       </div>
 
-      {/* Camera video overlay - top right */}
+      {/* Mini camera video (top-right – CSS positions via HUD) */}
       <div className="video-overlay">
-        <video
-          ref={videoRef}
-          width="200"
-          height="150"
-          muted
-          playsInline
+        <video ref={videoRef} width="200" height="150" muted playsInline />
+      </div>
+
+      {/* Floating radial menu instead of control box */}
+      <FabRadialMenu actions={fabActions} />
+
+  {/* Top HUD */}
+  <TopHUD score={score} multiplier={multiplier} best={bestScore} />
+
+  {/* Story HUD */}
+  {isStoryMode && storySnapshot && <StoryHUD state={storySnapshot} />}
+
+      {/* Toast message */}
+      {toast && <div className={`toast show`}>{toast}</div>}
+
+      {/* Panels */}
+      {uiOpenLeaderboard && (
+        <Leaderboard entries={scores} onClose={handleCloseLeaderboard} />
+      )}
+      {uiOpenSettings && (
+        <SettingsPanel
+          values={{ music: settings.music, sfx: settings.sfx, overlay: showSkeletonOverlay }}
+          onChange={(v)=>{
+            const next = {...settings, ...v};
+            setSettings(next);
+            if (v.overlay !== undefined) toggleSkeletonOverlay();
+          }}
+          onClose={handleCloseSettings}
         />
-      </div>
-
-      {/* Control panel - top left */}
-      <div className="controls">
-        <h2>Live Human Skeleton Physics Demo</h2>
-        
-        <div className="status">
-          <span>Status: {systemsReady ? 'Ready' : 'Initializing...'}</span>
-          <span>Tracking: {isDetectionActive ? 'ON' : 'OFF'}</span>
-          <span>Mode: {gameMode}</span>
-          <span>Score: {score}</span>
-        </div>
-
-        <div className="buttons">
-          {systemsReady && (
-            <>
-              <button onClick={isDetectionActive ? stopTracking : startTracking}>
-                {isDetectionActive ? 'Stop Tracking' : 'Start Tracking'}
-              </button>
-              
-              <button onClick={toggleGameMode}>
-                Switch to {gameMode === 'visualization' ? 'Physics' : 'Visualization'} Mode
-              </button>
-              
-              <button onClick={resetGame}>
-                Reset Game
-              </button>
-              
-              <button onClick={toggleSkeletonOverlay}>
-                {showSkeletonOverlay ? 'Hide' : 'Show'} Skeleton Overlay
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* Instructions panel - bottom left */}
-      <div className={`instructions ${showInstructions ? '' : 'hidden'}`}>
-        <h3>Instructions:</h3>
-        <ul>
-          <li><strong>Visualization Mode:</strong> See your skeleton tracked in real-time</li>
-          <li><strong>Physics Mode:</strong> Your skeleton becomes a physics object that can interact with balls</li>
-          <li>Move your hands to hit the colored balls and score points!</li>
-          <li>The physics system uses Rapier3D for realistic interactions</li>
-        </ul>
-        
-        <h3>Architecture:</h3>
-        <ul>
-          <li><strong>SkeletonProvider:</strong> MediaPipe pose detection (separated from rendering)</li>
-          <li><strong>ThreeSkeletonRenderer:</strong> Pure Three.js visualization</li>
-          <li><strong>SkeletonPhysicsSystem:</strong> Rapier3D physics integration</li>
-          <li>This modular design allows easy extension for complex games!</li>
-        </ul>
-      </div>
-
-      {/* Instructions toggle button - bottom right */}
-      <button 
-        className="instructions-toggle"
-        onClick={() => setShowInstructions(!showInstructions)}
-        title={showInstructions ? 'Hide Instructions' : 'Show Instructions'}
-      >
-        {showInstructions ? '×' : '?'}
-      </button>
+      )}
     </div>
   );
 };

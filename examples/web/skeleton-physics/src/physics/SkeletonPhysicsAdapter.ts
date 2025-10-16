@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { PhysicsSystem, PhysicsObject } from './PhysicsSystem';
-import { SkeletonData, SkeletonJoint } from '../providers/SkeletonProvider';
+import { SkeletonData } from '../providers/SkeletonProvider';
 
 export interface SkeletonPhysicsOptions {
   jointMass?: number;
@@ -18,20 +18,12 @@ export interface SkeletonPhysicsOptions {
 export class SkeletonPhysicsAdapter {
   private physicsSystem: PhysicsSystem;
   private skeletonJoints: Map<number, PhysicsObject> = new Map();
-  private lastSkeletonData: SkeletonData | null = null;
-  private options: Required<SkeletonPhysicsOptions>;
+  // private lastSkeletonData: SkeletonData | null = null;
+  // private options: Required<SkeletonPhysicsOptions>;
 
-  constructor(physicsSystem: PhysicsSystem, options: SkeletonPhysicsOptions = {}) {
+  constructor(physicsSystem: PhysicsSystem, _options: SkeletonPhysicsOptions = {}) {
     this.physicsSystem = physicsSystem;
-    this.options = {
-      jointMass: 2.0,
-      jointRadius: 0.08,
-      boneStiffness: 1000.0,
-      damping: 25.0,
-      enableCollisions: true,
-      gravityScale: 1.0,
-      ...options
-    };
+    // Options could be used to adjust physics parameters in future
   }
 
   /**
@@ -46,7 +38,7 @@ export class SkeletonPhysicsAdapter {
 
     this.updateJointPositions(skeletonData);
 
-    this.lastSkeletonData = skeletonData;
+  // this.lastSkeletonData = skeletonData;
   }
 
   /**
