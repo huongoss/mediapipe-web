@@ -26,6 +26,13 @@ body::-webkit-scrollbar {
   position: relative;
 }
 
+/* Ensure UI overlays can sit above the canvas reliably */
+.physics-game-demo .ui-layer {
+  position: relative;
+  z-index: 2000;
+  pointer-events: none;
+}
+
 .controls {
   position: absolute;
   top: 20px;

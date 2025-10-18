@@ -12,7 +12,8 @@ export const FabRadialMenu: React.FC<{
   actions: FabAction[];
   open?: boolean;
   onToggle?: (open: boolean)=>void;
-}> = ({ actions, open: openProp, onToggle }) => {
+  placement?: 'bottom-left' | 'bottom-right' | 'top-left' | 'top-right';
+}> = ({ actions, open: openProp, onToggle, placement = 'bottom-left' }) => {
   const [open, setOpen] = React.useState(!!openProp);
   React.useEffect(()=>{ if (openProp !== undefined) setOpen(openProp); }, [openProp]);
   const toggle = () => {
@@ -20,7 +21,7 @@ export const FabRadialMenu: React.FC<{
   };
 
   return (
-    <div className={`fab ${open? 'open':''}`}>
+    <div className={`fab ${open? 'open':''} ${placement.replace('-', '')}`}>
       <button aria-label="menu" className="fab-main" onClick={toggle}>⚡</button>
       <div className="fab-ring">
         {actions.map((a, i)=> (

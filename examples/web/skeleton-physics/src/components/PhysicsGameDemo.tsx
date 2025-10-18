@@ -20,11 +20,14 @@ import { TrailParticles } from '../game/TrailParticles.ts';
 import { StoryMode } from '../story/StoryMode';
 import { StoryHUD } from '../ui/StoryHUD';
 import { StoryEnvironment } from '../story/StoryEnvironment';
+import { StoryGuideOverlay } from '../ui/StoryGuideOverlay';
 
 // Pool and ball constants
 const MAX_BALLS = 20;
 const BALL_RADIUS = 0.08;
 const OFFSCREEN_POS = new THREE.Vector3(0, -3, 0);
+const TARGET_ACTIVE_BALLS = 12; // desired number of active balls in normal mode
+const SPAWN_INTERVAL_MS = 1000; // how often to try spawning a new ball
 
 interface PhysicsGameDemoProps {
   modelPath: string;
@@ -62,15 +65,37 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
   const [bestScore, setBestScore] = useState(0);
   const [multiplier, setMultiplier] = useState(1);
   const [settings, setSettings] = useState({ music:false, sfx:true, overlay:false });
+  const settingsRef = useRef(settings);
   const [scores, setScores] = useState(loadScores());
   const [toast, setToast] = useState<string | null>(null);
   const [showHome, setShowHome] = useState(true);
   const [showResult, setShowResult] = useState(false);
   const [isStoryMode, setIsStoryMode] = useState(false);
+  const [splashMsg, setSplashMsg] = useState<string | null>(null);
+  const [isRoundActive, setIsRoundActive] = useState(false);
   const storyModeRef = useRef<StoryMode | null>(null);
   const [storySnapshot, setStorySnapshot] = useState<any | null>(null);
   const prevStoryChapterRef = useRef<number>(0);
   const storyEnvRef = useRef<StoryEnvironment | null>(null);
+  const isStoryModeRef = useRef<boolean>(false);
+  const spawnerTimerRef = useRef<number | null>(null);
+  const lastSafetyCheckRef = useRef<number>(0);
+  const isRoundActiveRef = useRef<boolean>(false);
+  const musicElRef = useRef<HTMLAudioElement | null>(null);
+
+  // Helper to spawn one inactive ball from the pool
+  const spawnOneFromPool = () => {
+    const idx = ballPoolRef.current.findIndex(b => !b.active);
+    if (idx >= 0) {
+      const ball = ballPoolRef.current[idx];
+      const { position, velocity } = generateBallSpawn();
+      ball.active = true;
+      ball.mesh.visible = true;
+      ball.mesh.position.copy(position);
+      ball.rigidBody.setTranslation({ x: position.x, y: position.y, z: 0 }, true);
+      ball.rigidBody.setLinvel(velocity, true);
+    }
+  };
 
   // Create pausable wrappers for all components
   const pausableComponents = useRef<PausableComponent[]>([]);
@@ -85,6 +110,31 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     const id = setInterval(()=> setMultiplier(m=> Math.max(1, +(m - 0.02).toFixed(2))), 200);
     return ()=> clearInterval(id);
   }, [multiplier]);
+
+  // Utility: classify bone segment by joint ids
+  const classifySegment = (fromId: number, toId: number): 'good' | 'bad' | 'neutral' => {
+    // MediaPipe Pose joint ids
+    const HEAD_IDS = new Set([0,1,2,3,4,5,6,7,8,9,10]); // head/face region
+    const SHOULDERS = new Set([11,12]);
+  // const ELBOWS = new Set([13,14]);
+    const WRISTS = new Set([15,16]);
+  // const HIPS = new Set([23,24]);
+    const UPPER_ARMS: Array<[number, number]> = [[11,13],[12,14]];
+    const FOREARMS: Array<[number, number]> = [[13,15],[14,16]];
+    const TORSO: Array<[number, number]> = [[11,12],[11,23],[12,24],[23,24]];
+
+    const a = Math.min(fromId, toId), b = Math.max(fromId, toId);
+    const match = (pairs: Array<[number, number]>) => pairs.some(([x,y]) => x===a && y===b);
+
+    // Good: hands/forearms (wrist-elbow)
+    if (WRISTS.has(a) || WRISTS.has(b) || match(FOREARMS)) return 'good';
+    // Bad: head, shoulders, upper arms, torso
+    if (HEAD_IDS.has(a) || HEAD_IDS.has(b)) return 'bad';
+    if (SHOULDERS.has(a) || SHOULDERS.has(b)) return 'bad';
+    if (match(UPPER_ARMS)) return 'bad';
+    if (match(TORSO)) return 'bad';
+    return 'neutral';
+  };
 
   useEffect(() => {
     if(!canvasRef.current) return;
@@ -101,6 +151,11 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
       });
     };
   }, []);
+
+  // Keep ref in sync so the animation loop can read the latest story mode flag
+  useEffect(()=>{ isStoryModeRef.current = isStoryMode; }, [isStoryMode]);
+  useEffect(()=>{ isRoundActiveRef.current = isRoundActive; }, [isRoundActive]);
+  useEffect(()=>{ settingsRef.current = settings; }, [settings]);
 
   const initializeDemo = async () => {
     console.log('🚀 PhysicsGameDemo: Starting initialization...');
@@ -426,16 +481,29 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
       ball.rigidBody.setLinvel(velocity, true);
     };
 
-    // Spawn initial set of balls (reuse from pool) coming from random directions
-    console.log('🎯 Spawning initial balls from pool...');
-    for (let i = 0; i < Math.min(8, MAX_BALLS); i++) {
-      activateBall(i);
-    }
+    // Utility: activate one inactive ball (if available)
+    const spawnOne = () => {
+      const idx = ballPoolRef.current.findIndex(b => !b.active);
+      if (idx >= 0) activateBall(idx);
+    };
+
+    // Defer initial spawning until round starts (music-based)
+    console.log('⏸️ Deferring ball spawn until round starts...');
 
     // Keep compatibility with existing refs by mirroring pool into gameObjectsRef
     gameObjectsRef.current = ballPoolRef.current;
 
     console.log('✅ Ball pool initialized and initial balls activated');
+
+    // Periodically spawn new balls to keep action lively (normal mode + round active only)
+    if (spawnerTimerRef.current) window.clearInterval(spawnerTimerRef.current);
+    spawnerTimerRef.current = window.setInterval(() => {
+      if (isStoryModeRef.current || !isRoundActiveRef.current) return;
+      const activeCount = ballPoolRef.current.reduce((acc, b) => acc + (b.active ? 1 : 0), 0);
+      if (activeCount < TARGET_ACTIVE_BALLS) {
+        spawnOne();
+      }
+    }, SPAWN_INTERVAL_MS);
   };
 
   const startTracking = async () => {
@@ -465,6 +533,65 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     }
   };
 
+  // Music-driven round control
+  const startMusicRound = () => {
+    // choose a random mp3 in public/media
+    const tracks = [
+      '/media/30eac4c8-7878-4185-87d4-c8b3721c9204.mp3',
+      '/media/371a2531-7ff1-42b7-9e29-0b5cb8cc037f.mp3'
+    ];
+    const pick = tracks[Math.floor(Math.random()*tracks.length)];
+    // show start splash
+    setSplashMsg('Get Ready! 🎵');
+    setTimeout(()=> setSplashMsg(null), 1200);
+
+    // prepare audio element lazily
+    if (!musicElRef.current) {
+      musicElRef.current = new Audio();
+      musicElRef.current.preload = 'auto';
+    }
+    const el = musicElRef.current;
+    el!.src = pick;
+    el!.currentTime = 0;
+    el!.volume = settingsRef.current.music ? 0.8 : 0.8; // volume independent of sfx setting
+    el!.onended = () => {
+      endMusicRound();
+    };
+    el!.play().catch(()=>{
+      // If autoplay blocked, user interaction will unlock later.
+    });
+
+    // Mark round active and spawn initial volley
+    setIsRoundActive(true);
+    // spawn up to target active balls immediately
+    for (let i = 0; i < Math.min(TARGET_ACTIVE_BALLS, MAX_BALLS); i++) {
+      const idx = ballPoolRef.current.findIndex(b => !b.active);
+      if (idx >= 0) {
+        const { position, velocity } = generateBallSpawn();
+        const ball = ballPoolRef.current[idx];
+        ball.active = true;
+        ball.mesh.visible = true;
+        ball.mesh.position.copy(position);
+        ball.rigidBody.setTranslation({ x: position.x, y: position.y, z: 0 }, true);
+        ball.rigidBody.setLinvel(velocity, true);
+      }
+    }
+  };
+
+  const endMusicRound = () => {
+    // show end splash and stop spawns
+    setIsRoundActive(false);
+    setSplashMsg('Song finished 🎮 Game Over');
+    setTimeout(()=> setSplashMsg(null), 1500);
+    // Stop and clear audio
+    try { musicElRef.current?.pause(); } catch {}
+    if (musicElRef.current) {
+      musicElRef.current.onended = null;
+    }
+    // Show result overlay
+    setShowResult(true);
+  };
+
   const stopTracking = () => {
     if (skeletonProviderRef.current) {
       skeletonProviderRef.current.stopLiveDetection();
@@ -476,15 +603,25 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
   const resetGame = () => {
     setScore(0);
 
-    // Reset all balls by respawning from random directions
-    ballPoolRef.current.forEach((ball) => {
-      const { position, velocity } = generateBallSpawn();
-      ball.active = true;
-      ball.mesh.visible = true;
-      ball.mesh.position.copy(position);
-      ball.rigidBody.setTranslation({ x: position.x, y: position.y, z: 0 }, true);
-      ball.rigidBody.setLinvel(velocity, true);
-    });
+    // Arcade-only: respawn balls; in Story Mode, hide and deactivate balls
+    if (!isStoryModeRef.current) {
+      ballPoolRef.current.forEach((ball) => {
+        const { position, velocity } = generateBallSpawn();
+        ball.active = true;
+        ball.mesh.visible = true;
+        ball.mesh.position.copy(position);
+        ball.rigidBody.setTranslation({ x: position.x, y: position.y, z: 0 }, true);
+        ball.rigidBody.setLinvel(velocity, true);
+      });
+    } else {
+      ballPoolRef.current.forEach((ball) => {
+        ball.active = false;
+        ball.mesh.visible = false;
+        ball.mesh.position.copy(OFFSCREEN_POS);
+        ball.rigidBody.setTranslation({ x: OFFSCREEN_POS.x, y: OFFSCREEN_POS.y, z: OFFSCREEN_POS.z }, true);
+        ball.rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      });
+    }
 
     const name = localStorage.getItem('player_name') || 'Player';
     if (score > 0) {
@@ -519,6 +656,11 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     // story environment
     storyEnvRef.current?.dispose();
     storyEnvRef.current = null;
+    // stop spawner interval
+    if (spawnerTimerRef.current) {
+      window.clearInterval(spawnerTimerRef.current);
+      spawnerTimerRef.current = null;
+    }
   };
 
   // Single unified animation loop that handles everything
@@ -590,7 +732,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
 
         // Use pool for updates
         const activeBalls = ballPoolRef.current;
-        if (activeBalls.length > 0) {
+  if (!isStoryModeRef.current && isRoundActiveRef.current && activeBalls.length > 0) {
           activeBalls.forEach(({ rigidBody, mesh, active }, ballIndex) => {
             if (!active) return;
             try {
@@ -625,6 +767,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
                   const key = `${seg.fromId}-${seg.toId}`;
                   const boneSpeed = boneSpeeds.get(key) ?? 0;
                   const intensity = THREE.MathUtils.clamp(boneSpeed / 2.5, 0.2, 1); // scale speed -> [0,1]
+                  const classification = classifySegment(seg.fromId, seg.toId);
 
                   // Compute impulse away from contact towards ball
                   const hitDirection = new THREE.Vector3()
@@ -637,29 +780,40 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
                     z: hitDirection.z
                   }, true);
 
-                  setScore(prev => {
-                    const next = prev + 1;
-                    // Milestones
-                    if (next % 25 === 0) {
-                      confettiRef.current?.burst?.();
-                      setToast('Milestone! 🎉');
-                    }
-                    // Surpass best
-                    if (next > bestScore) {
-                      confettiRef.current?.burst?.(undefined, 80, 80);
-                    }
-                    return next;
-                  });
-                  // UX feedback
-                  setMultiplier(m=> +(Math.min(3, m + 0.05).toFixed(2)));
-                  setToast('Nice hit! ⚡');
-
-                  // Audio: pan by x, level by bone speed
+                  // Scoring and audio by classification (normal mode only)
                   const pan = THREE.MathUtils.clamp(ballPosition.x / 2.0, -1, 1);
-                  audioRef.current?.playCollision(pan, intensity);
-                  const ballSpeed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z);
-                  if (ballSpeed > 0.1) {
-                    audioRef.current?.playBounceFast(pan, Math.min(1, intensity * 1.2));
+                  if (!isStoryModeRef.current) {
+                    if (classification === 'good') {
+                      setScore(prev => {
+                        const next = prev + 1;
+                        if (next % 25 === 0) {
+                          confettiRef.current?.burst?.();
+                          setToast('Milestone! 🎉');
+                        }
+                        if (next > bestScore) {
+                          confettiRef.current?.burst?.(undefined, 80, 80);
+                        }
+                        return next;
+                      });
+                      setMultiplier(m=> +(Math.min(3, m + 0.05).toFixed(2)));
+                      setToast('Nice hit! ⚡');
+                      if (settingsRef.current.sfx) audioRef.current?.playCollision(pan, intensity);
+                      const ballSpeed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z);
+                      if (ballSpeed > 0.1) {
+                        if (settingsRef.current.sfx) audioRef.current?.playBounceFast(pan, Math.min(1, intensity * 1.2));
+                      }
+                    } else if (classification === 'bad') {
+                      setScore(prev => Math.max(0, prev - 1));
+                      setMultiplier(m=> +(Math.max(1, m - 0.05).toFixed(2)));
+                      setToast('Ouch! -1');
+                      if (settingsRef.current.sfx) audioRef.current?.playBadHit(pan, Math.max(0.4, 1 - intensity * 0.5));
+                    } else {
+                      // neutral: no score change, softer collision
+                      if (settingsRef.current.sfx) audioRef.current?.playCollision(pan, intensity * 0.5);
+                    }
+                  } else {
+                    // Story mode retains previous positive feedback behavior if ever active (but balls are off in story mode)
+                    if (settingsRef.current.sfx) audioRef.current?.playCollision(pan, intensity);
                   }
 
                   // Visual collision effect at contact point on ball surface
@@ -697,11 +851,24 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
                 const { position: newPosition, velocity: newVelocity } = generateBallSpawn();
                 rigidBody.setTranslation({ x: newPosition.x, y: newPosition.y, z: 0 }, true);
                 rigidBody.setLinvel(newVelocity, true);
+                // Reinforce visibility/active flags in case they drifted
+                mesh.visible = true;
+                (gameObjectsRef.current[ballIndex] as any).active = true;
               }
             } catch (error) {
               console.error(`❌ Error updating ball ${ballIndex}:`, error);
             }
           });
+
+          // Safety: if no active balls visible for a bit, force-spawn one
+          const nowMs = performance.now();
+          if (nowMs - lastSafetyCheckRef.current > 2000) {
+            lastSafetyCheckRef.current = nowMs;
+            const activeVisible = ballPoolRef.current.some(b => b.active && b.mesh.visible);
+            if (!activeVisible && !isStoryModeRef.current) {
+              spawnOneFromPool();
+            }
+          }
         }
 
         // Continue animation loop
@@ -837,6 +1004,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     setShowHome(false);
     if (!isDetectionActive) await startTracking();
     togglePause(); // resume
+    startMusicRound();
   };
 
   // When resetting after a result, show home again
@@ -874,10 +1042,25 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
         if (rendererRef.current && !storyEnvRef.current) {
           storyEnvRef.current = new StoryEnvironment(rendererRef.current.getScene());
         }
+        // hide and deactivate balls for story mode
+        ballPoolRef.current.forEach((ball) => {
+          ball.active = false;
+          ball.mesh.visible = false;
+          ball.mesh.position.copy(OFFSCREEN_POS);
+          ball.rigidBody.setTranslation({ x: OFFSCREEN_POS.x, y: OFFSCREEN_POS.y, z: OFFSCREEN_POS.z }, true);
+          ball.rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+        });
         onStartGame();
       }} />}
       {isPaused && !showHome && !showResult && <PauseOverlay onResume={togglePause} onRestart={resetGame} />}
       {showResult && <ResultOverlay score={score} best={bestScore} onShare={handleShare} onPlayAgain={onPlayAgain} />}
+      {splashMsg && (
+        <div style={{position:'fixed', inset:0, display:'flex', alignItems:'center', justifyContent:'center', pointerEvents:'none', zIndex:1300}}>
+          <div style={{background:'rgba(0,0,0,0.6)', color:'#ffd166', padding:'16px 24px', borderRadius:12, fontSize:22, fontWeight:700, boxShadow:'0 8px 24px rgba(0,0,0,0.4)'}}>
+            {splashMsg}
+          </div>
+        </div>
+      )}
 
       {/* Confetti overlay */}
       <ConfettiOverlay ref={confettiRef as any} />
@@ -893,13 +1076,21 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
       </div>
 
       {/* Floating radial menu instead of control box */}
-      <FabRadialMenu actions={fabActions} />
+  <FabRadialMenu actions={fabActions} placement="bottom-left" />
 
   {/* Top HUD */}
   <TopHUD score={score} multiplier={multiplier} best={bestScore} />
 
   {/* Story HUD */}
   {isStoryMode && storySnapshot && <StoryHUD state={storySnapshot} />}
+
+  {/* Story expected pose guide */}
+  {isStoryMode && storySnapshot && (()=>{
+    const chapter = storySnapshot.chapters[storySnapshot.chapterIndex];
+    const next = chapter?.objectives?.find((o:any)=> !o.done);
+    const nextGesture = next?.required?.find((r:any)=> (next.progress?.[r.type]||0) < (r.holdMs||500))?.type ?? null;
+    return <StoryGuideOverlay gesture={nextGesture} />;
+  })()}
 
       {/* Toast message */}
       {toast && <div className={`toast show`}>{toast}</div>}
