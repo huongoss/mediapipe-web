@@ -52,6 +52,12 @@ export class AudioManager {
     setTimeout(() => this.blip({ startFreq: 240, endFreq: 80, duration: 0.11, gain: 0.55 * g, pan }), 12);
   }
 
+  playPity(pan: number = 0, intensity: number = 1) {
+    // A short descending "sigh" to convey pity
+    const g = Math.max(0, Math.min(1, intensity));
+    this.gliss({ startFreq: 520, endFreq: 300, duration: 0.28, gain: 0.35 * g, pan });
+  }
+
   // Internals
   private blip(opts: { startFreq: number; endFreq: number; duration: number; gain: number; pan?: number }) {
     if (!this.ctx || !this.master) return;
@@ -155,6 +161,59 @@ export class AudioManager {
       src.onended = () => {
         try { src.disconnect(); } catch {}
         try { env.disconnect(); } catch {}
+      };
+    }
+  }
+
+  private gliss(opts: { startFreq: number; endFreq: number; duration: number; gain: number; pan?: number }) {
+    if (!this.ctx || !this.master) return;
+    const { startFreq, endFreq, duration, gain, pan = 0 } = opts;
+    const now = this.ctx.currentTime;
+
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sine';
+    const env = this.ctx.createGain();
+    env.gain.setValueAtTime(0, now);
+    env.gain.linearRampToValueAtTime(gain, now + 0.02);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+
+    // Gentle lowpass sweep downward for a wah-like pity
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(1600, now);
+    filter.frequency.exponentialRampToValueAtTime(400, now + duration);
+
+    if (this.pannerSupported) {
+      const panner: StereoPannerNode = (this.ctx as any).createStereoPanner();
+      panner.pan.value = Math.max(-1, Math.min(1, pan));
+      osc.connect(filter);
+      filter.connect(env);
+      env.connect(panner);
+      panner.connect(this.master);
+
+      osc.frequency.setValueAtTime(startFreq, now);
+      osc.frequency.exponentialRampToValueAtTime(Math.max(80, endFreq), now + duration);
+
+      osc.start(now);
+      osc.stop(now + duration + 0.02);
+      osc.onended = () => {
+        try { osc.disconnect(); } catch {}
+        try { env.disconnect(); } catch {}
+        try { filter.disconnect(); } catch {}
+        try { panner.disconnect(); } catch {}
+      };
+    } else {
+      osc.connect(filter);
+      filter.connect(env);
+      env.connect(this.master);
+      osc.frequency.setValueAtTime(startFreq, now);
+      osc.frequency.exponentialRampToValueAtTime(Math.max(80, endFreq), now + duration);
+      osc.start(now);
+      osc.stop(now + duration + 0.02);
+      osc.onended = () => {
+        try { osc.disconnect(); } catch {}
+        try { env.disconnect(); } catch {}
+        try { filter.disconnect(); } catch {}
       };
     }
   }

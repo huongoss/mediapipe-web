@@ -64,7 +64,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
   const [uiOpenSettings, setUiOpenSettings] = useState(false);
   const [bestScore, setBestScore] = useState(0);
   const [multiplier, setMultiplier] = useState(1);
-  const [settings, setSettings] = useState({ music:false, sfx:true, overlay:false });
+  const [settings, setSettings] = useState({ music:true, musicVolume: 0.3, sfx:true, overlay:false });
   const settingsRef = useRef(settings);
   const [scores, setScores] = useState(loadScores());
   const [toast, setToast] = useState<string | null>(null);
@@ -82,6 +82,27 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
   const lastSafetyCheckRef = useRef<number>(0);
   const isRoundActiveRef = useRef<boolean>(false);
   const musicElRef = useRef<HTMLAudioElement | null>(null);
+  const [musicProgress, setMusicProgress] = useState(0); // 0..1 of current track
+  const lastMusicProgUpdateRef = useRef<number>(0);
+  // Floating per-hit labels
+  const [hitLabels, setHitLabels] = useState<Array<{id:number; x:number; y:number; text:string; color:string}>>([]);
+  const nextHitIdRef = useRef<number>(1);
+
+  const addHitLabel = (worldPos: THREE.Vector3, kind: 'good'|'bad'|'neutral') => {
+    const camera = rendererRef.current?.getCamera?.();
+    if (!camera) return;
+    const v = worldPos.clone().project(camera);
+    const x = (v.x * 0.5 + 0.5) * window.innerWidth;
+    const y = (1 - (v.y * 0.5 + 0.5)) * window.innerHeight;
+    // Only show labels for good/bad to reduce clutter
+    if (kind === 'neutral') return;
+    const badTexts = ['Bad hit', 'Oh No'];
+    const text = kind === 'good' ? 'Nice hit! ⚡' : badTexts[Math.floor(Math.random()*badTexts.length)];
+    const color = kind === 'good' ? '#00ff88' : '#ff2b2b';
+    const id = nextHitIdRef.current++;
+    setHitLabels(list => [...list, { id, x, y, text, color }]);
+    setTimeout(()=> setHitLabels(list => list.filter(l => l.id !== id)), 900);
+  };
 
   // Helper to spawn one inactive ball from the pool
   const spawnOneFromPool = () => {
@@ -156,6 +177,30 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
   useEffect(()=>{ isStoryModeRef.current = isStoryMode; }, [isStoryMode]);
   useEffect(()=>{ isRoundActiveRef.current = isRoundActive; }, [isRoundActive]);
   useEffect(()=>{ settingsRef.current = settings; }, [settings]);
+  // Reflect music volume changes live
+  useEffect(()=>{
+    if (musicElRef.current) {
+      musicElRef.current.volume = Math.max(0, Math.min(1, settings.musicVolume));
+      if (!settings.music) {
+        try { musicElRef.current.muted = true; } catch {}
+      } else {
+        try { musicElRef.current.muted = false; } catch {}
+      }
+    }
+  }, [settings.music, settings.musicVolume]);
+
+  // Keep music playback in sync with pause/resume and settings
+  useEffect(()=>{
+    const el = musicElRef.current;
+    if (!el) return;
+    if (isPaused || !isRoundActive || !settings.music) {
+      try { el.pause(); } catch {}
+    } else {
+      if (el.paused) {
+        el.play().catch(()=>{});
+      }
+    }
+  }, [isPaused, isRoundActive, settings.music]);
 
   const initializeDemo = async () => {
     console.log('🚀 PhysicsGameDemo: Starting initialization...');
@@ -553,17 +598,26 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     const el = musicElRef.current;
     el!.src = pick;
     el!.currentTime = 0;
-    el!.volume = settingsRef.current.music ? 0.8 : 0.8; // volume independent of sfx setting
+  el!.volume = Math.max(0, Math.min(1, settingsRef.current.musicVolume));
+  el!.muted = !settingsRef.current.music;
     el!.onended = () => {
       endMusicRound();
     };
     el!.play().catch(()=>{
       // If autoplay blocked, user interaction will unlock later.
     });
+    setMusicProgress(0);
 
+    // Reset pool to a consistent state before spawning
+    ballPoolRef.current.forEach((ball) => {
+      ball.active = false;
+      ball.mesh.visible = false;
+      ball.mesh.position.copy(OFFSCREEN_POS);
+      ball.rigidBody.setTranslation({ x: OFFSCREEN_POS.x, y: OFFSCREEN_POS.y, z: OFFSCREEN_POS.z }, true);
+      ball.rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    });
     // Mark round active and spawn initial volley
     setIsRoundActive(true);
-    // spawn up to target active balls immediately
     for (let i = 0; i < Math.min(TARGET_ACTIVE_BALLS, MAX_BALLS); i++) {
       const idx = ballPoolRef.current.findIndex(b => !b.active);
       if (idx >= 0) {
@@ -588,6 +642,15 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     if (musicElRef.current) {
       musicElRef.current.onended = null;
     }
+    setMusicProgress(0);
+    // Deactivate and hide all balls to stop gameplay
+    ballPoolRef.current.forEach((ball) => {
+      ball.active = false;
+      ball.mesh.visible = false;
+      ball.mesh.position.copy(OFFSCREEN_POS);
+      ball.rigidBody.setTranslation({ x: OFFSCREEN_POS.x, y: OFFSCREEN_POS.y, z: OFFSCREEN_POS.z }, true);
+      ball.rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    });
     // Show result overlay
     setShowResult(true);
   };
@@ -603,8 +666,8 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
   const resetGame = () => {
     setScore(0);
 
-    // Arcade-only: respawn balls; in Story Mode, hide and deactivate balls
-    if (!isStoryModeRef.current) {
+    // Arcade-only: respawn balls if round is active; otherwise keep them hidden
+    if (!isStoryModeRef.current && isRoundActiveRef.current) {
       ballPoolRef.current.forEach((ball) => {
         const { position, velocity } = generateBallSpawn();
         ball.active = true;
@@ -796,7 +859,6 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
                         return next;
                       });
                       setMultiplier(m=> +(Math.min(3, m + 0.05).toFixed(2)));
-                      setToast('Nice hit! ⚡');
                       if (settingsRef.current.sfx) audioRef.current?.playCollision(pan, intensity);
                       const ballSpeed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y + velocity.z * velocity.z);
                       if (ballSpeed > 0.1) {
@@ -805,8 +867,11 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
                     } else if (classification === 'bad') {
                       setScore(prev => Math.max(0, prev - 1));
                       setMultiplier(m=> +(Math.max(1, m - 0.05).toFixed(2)));
-                      setToast('Ouch! -1');
-                      if (settingsRef.current.sfx) audioRef.current?.playBadHit(pan, Math.max(0.4, 1 - intensity * 0.5));
+                      // no global toast here; local label handles feedback
+                      if (settingsRef.current.sfx) {
+                        audioRef.current?.playBadHit(pan, Math.max(0.6, 1 - intensity * 0.4));
+                        audioRef.current?.playPity(pan, 0.9);
+                      }
                     } else {
                       // neutral: no score change, softer collision
                       if (settingsRef.current.sfx) audioRef.current?.playCollision(pan, intensity * 0.5);
@@ -821,25 +886,31 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
                   const contactPoint = ballPosition.clone().addScaledVector(dir, -ballRadius);
                   const scene = rendererRef.current?.getScene();
                   if (scene) {
+                    const fxColor = classification === 'bad' ? 0xff2b2b : (mesh.material as THREE.MeshBasicMaterial).color.getHex();
                     const fx = createCollisionEffect(scene, contactPoint, {
-                      color: (mesh.material as THREE.MeshBasicMaterial).color.getHex(),
+                      color: fxColor,
                     });
                     collisionEffectsRef.current.push(fx);
                   }
+
+                  // Floating label near impact
+                  addHitLabel(contactPoint, classification);
 
                   // Trails: burst small particles from contact point
                   trailParticlesRef.current?.burst(contactPoint, new THREE.Color((mesh.material as THREE.MeshBasicMaterial).color.getHex()), 40);
 
                   // Temporary color flash for the ball
                   const originalColor = (mesh.material as THREE.MeshBasicMaterial).color.clone();
-                  (mesh.material as THREE.MeshBasicMaterial).color.setHex(0xffffff);
+                  if (classification === 'bad') {
+                    (mesh.material as THREE.MeshBasicMaterial).color.setHex(0xff2b2b);
+                  } else {
+                    (mesh.material as THREE.MeshBasicMaterial).color.setHex(0xffffff);
+                  }
                   setTimeout(() => {
                     (mesh.material as THREE.MeshBasicMaterial).color.copy(originalColor);
                   }, 120);
 
-                  // UX: bump multiplier slightly and toast
-                  setMultiplier(m=> +(Math.min(3, m + 0.05).toFixed(2)));
-                  setToast('Nice hit! ⚡');
+                  // (no extra multiplier bump here to avoid double increment)
 
                   // Only handle first segment collision per frame for this ball
                   break;
@@ -872,6 +943,17 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
         }
 
         // Continue animation loop
+        // Update music progress (throttled) so TopHUD syncs with track
+        const el = musicElRef.current;
+        if (el && isRoundActiveRef.current) {
+          const dur = el.duration || 0;
+          const prog = dur > 0 ? Math.min(1, Math.max(0, el.currentTime / dur)) : 0;
+          if (time - lastMusicProgUpdateRef.current > 100) {
+            lastMusicProgUpdateRef.current = time;
+            setMusicProgress(prog);
+          }
+        }
+
         animationId = requestAnimationFrame(animate);
       } catch (error) {
         console.error('❌ Animation loop error:', error);
@@ -1012,6 +1094,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     setShowResult(false);
     resetGame();
     if (!isDetectionActive) startTracking();
+    startMusicRound();
   };
 
   // Show result overlay on big milestone (optional hook for future end-state)
@@ -1025,6 +1108,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
     { id:'pause', label: isPaused? 'Resume':'Pause', onClick: ()=> togglePause(), emoji: isPaused? '▶️':'⏸️' },
     { id:'camera', label: isDetectionActive? 'Stop Camera':'Start Camera', onClick: ()=> isDetectionActive? stopTracking(): startTracking(), emoji:'📷' },
     { id:'overlay', label: showSkeletonOverlay? 'Hide 2D':'Show 2D', onClick: ()=> toggleSkeletonOverlay(), emoji:'🧩' },
+    { id:'settings', label:'Settings', onClick: ()=> setUiOpenSettings(true), emoji:'⚙️' },
     { id:'restart', label:'Restart', onClick: ()=> resetGame(), emoji:'🔁' },
     { id:'share', label:'Share', onClick: ()=> handleShare(), emoji:'📣' },
   ];
@@ -1079,7 +1163,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
   <FabRadialMenu actions={fabActions} placement="bottom-left" />
 
   {/* Top HUD */}
-  <TopHUD score={score} multiplier={multiplier} best={bestScore} />
+  <TopHUD score={score} multiplier={multiplier} best={bestScore} musicProgress={isRoundActive ? musicProgress : 0} />
 
   {/* Story HUD */}
   {isStoryMode && storySnapshot && <StoryHUD state={storySnapshot} />}
@@ -1095,17 +1179,29 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
       {/* Toast message */}
       {toast && <div className={`toast show`}>{toast}</div>}
 
+      {/* Floating per-hit labels overlay */}
+      {hitLabels.length > 0 && (
+        <div style={{ position:'fixed', inset:0, pointerEvents:'none', zIndex:1400 }}>
+          {hitLabels.map(l => (
+            <div key={l.id}
+                 style={{ position:'absolute', left: l.x, top: l.y, transform:'translate(-50%, -120%)', color: l.color, fontWeight:800, textShadow:'0 2px 6px rgba(0,0,0,0.6)', fontSize:18, transition:'all 0.3s ease' }}>
+              {l.text}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Panels */}
       {uiOpenLeaderboard && (
         <Leaderboard entries={scores} onClose={handleCloseLeaderboard} />
       )}
       {uiOpenSettings && (
         <SettingsPanel
-          values={{ music: settings.music, sfx: settings.sfx, overlay: showSkeletonOverlay }}
+          values={{ music: settings.music, musicVolume: settings.musicVolume, sfx: settings.sfx, overlay: showSkeletonOverlay }}
           onChange={(v)=>{
-            const next = {...settings, ...v};
+            const next = { ...settings, ...v } as typeof settings;
             setSettings(next);
-            if (v.overlay !== undefined) toggleSkeletonOverlay();
+            if (v.overlay !== undefined && v.overlay !== showSkeletonOverlay) toggleSkeletonOverlay();
           }}
           onClose={handleCloseSettings}
         />

@@ -5,8 +5,9 @@ export const TopHUD: React.FC<{
   score: number;
   multiplier: number;
   best: number;
-}> = ({ score, multiplier, best }) => {
-  const pct = Math.min(100, Math.max(0, (multiplier - 1) / 2 * 100)); // 1..3 -> 0..100%
+  musicProgress?: number; // 0..1
+}> = ({ score, multiplier, best, musicProgress = 0 }) => {
+  const pct = Math.min(100, Math.max(0, musicProgress * 100));
   return (
     <div className="top-hud">
       <div className="hud-chip">

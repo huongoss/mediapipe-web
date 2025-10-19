@@ -55,19 +55,51 @@ html,body,#root{height:100%;margin:0;overflow:hidden;background:radial-gradient(
 .panel h3{margin:0 0 6px 0;color:var(--text);font-size:16px}
 .panel .row{display:flex;gap:8px;align-items:center;justify-content:space-between;margin:6px 0}
 
+/* Settings Modal */
+.settings-modal{position:fixed;inset:0;z-index:2200;display:flex;align-items:center;justify-content:center;pointer-events:none}
+.settings-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.5);backdrop-filter:blur(4px);pointer-events:auto}
+.settings-card{position:relative;pointer-events:auto;min-width:360px;max-width:92vw;padding:18px 18px 16px;border-radius:16px;box-shadow:0 24px 60px rgba(0,0,0,.5)}
+.settings-title{margin:0 0 8px;color:var(--text);font-size:20px}
+.settings-close{position:absolute;top:10px;right:10px;border:none;background:rgba(255,255,255,.08);color:var(--text);width:36px;height:36px;border-radius:10px;cursor:pointer}
+.settings-section{margin-top:8px;padding:10px;border-radius:12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.08)}
+.settings-row{display:flex;align-items:center;gap:12px;justify-content:space-between;margin:10px 0}
+.settings-label{color:var(--text);font-weight:700;font-size:15px}
+.settings-range{flex:1;margin:0 8px;height:6px}
+.settings-value{width:54px;text-align:right;color:var(--muted);font-weight:700}
+.settings-actions{display:flex;justify-content:flex-end;margin-top:12px}
+
 .leaderboard{min-width:280px}
 .leaderboard .entry{display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:8px;background:rgba(255,255,255,.06);margin:4px 0}
 
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:rgba(0,0,0,.6);color:white;padding:8px 12px;border-radius:8px;pointer-events:none;opacity:0;transition:opacity .2s, transform .2s;transform-origin:bottom center}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 
-/* Responsive */
+/* Responsive scaling */
+@media (min-width: 1024px){
+  /* Desktop/laptop: scale up UI */
+  .fab-main{width:72px;height:72px;font-size:30px}
+  .fab-item{width:54px;height:54px}
+  .fab-emoji{font-size:22px}
+  .top-hud{top:16px}
+  .score-badge{font-size:24px;padding:12px 16px}
+  .overlay-card{min-width:420px}
+  .toast{font-size:16px;padding:10px 14px}
+  .settings-card{min-width:440px;padding:22px}
+  .settings-title{font-size:22px}
+  .settings-close{width:40px;height:40px}
+  .settings-label{font-size:16px}
+}
+
 @media (max-width: 820px){
+  /* Mobile: ensure comfortable size but less screen usage */
   .panel{min-width:200px}
   .top-left{top:8px;left:8px}
   .top-right{top:8px;right:8px}
   .center-top{top:6px}
   .score-badge{font-size:18px}
+  .fab-main{width:60px;height:60px;font-size:24px}
+  .fab-item{width:42px;height:42px}
+  .settings-card{min-width:86vw}
 }
 
 /* FAB Radial Menu */
@@ -112,6 +144,8 @@ html,body,#root{height:100%;margin:0;overflow:hidden;background:radial-gradient(
 .fab.open .fab-item.i3{transform:translate(0,0) scale(1)}
 .fab.open .fab-item.i4{transform:translate(0,0) scale(1)}
 .fab-emoji{font-size:20px}
+.fab-item .fab-label{position:absolute;white-space:nowrap;left:50%;top:-8px;transform:translate(-50%,-100%);font-size:12px;background:rgba(0,0,0,.5);padding:4px 6px;border-radius:8px;pointer-events:none;opacity:0;transition:opacity .15s}
+.fab-item:hover .fab-label{opacity:1}
 
 /* Fullscreen overlays */
 .overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.4);backdrop-filter:blur(6px);pointer-events:none;z-index:1000}

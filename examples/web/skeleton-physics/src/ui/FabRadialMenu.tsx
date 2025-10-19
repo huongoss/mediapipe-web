@@ -27,6 +27,7 @@ export const FabRadialMenu: React.FC<{
         {actions.map((a, i)=> (
           <button key={a.id} className={`fab-item i${i}`} onClick={a.onClick} aria-label={a.label} title={a.label}>
             <span className="fab-emoji">{a.emoji ?? '•'}</span>
+            <span className="fab-label" aria-hidden>{a.label}</span>
           </button>
         ))}
       </div>
