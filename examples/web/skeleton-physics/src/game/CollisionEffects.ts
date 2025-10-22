@@ -85,7 +85,7 @@ export function createCollisionEffect(
     ring.scale.setScalar(scale);
     (ring.material as THREE.MeshBasicMaterial).opacity = 1.0 - ease;
     // Fake thickness change by scaling Y
-    ring.scale.y = Math.max(0.2, 1.0 - ease * 0.8);
+    ring.scale.y = Math.max(0.2, thickness / 0.006);
 
     // Sparks movement and fade
     for (let i = 0; i < sparkMeshes.length; i++) {

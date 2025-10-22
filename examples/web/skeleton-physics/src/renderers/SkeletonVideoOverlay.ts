@@ -425,6 +425,19 @@ export function createVideoSkeletonOverlay(
     
     console.log('✅ Video skeleton overlay created and connected');
     
+    const cleanup = () => {
+      videoElement.removeEventListener('loadedmetadata', updateSize);
+      videoElement.removeEventListener('resize', updateSize);
+      window.removeEventListener('resize', updateSize);
+      unsubscribe();
+    };
+
+    const originalDispose = overlay.dispose.bind(overlay);
+    overlay.dispose = () => {
+      cleanup();
+      originalDispose();
+    };
+
     return overlay;
   } else {
     throw new Error('Video element must have a parent container');

@@ -1,3 +1,11 @@
+export interface NormalizedLandmark {
+  x: number;
+  y: number;
+  z: number;
+  visibility?: number;
+  presence?: number;
+}
+
 export interface SkeletonJoint {
   id: number;
   name: string;
@@ -19,6 +27,13 @@ export interface SkeletonData {
   timestamp: number;
   confidence: number;
   movementRange?: MovementRange;
+  poseLandmarks2D?: NormalizedLandmark[];
+  poseLandmarks3D?: NormalizedLandmark[];
+  faceLandmarks?: NormalizedLandmark[];
+  leftHandLandmarks?: NormalizedLandmark[];
+  rightHandLandmarks?: NormalizedLandmark[];
+  poseBlendshapes?: unknown;
+  faceBlendshapes?: unknown;
 }
 
 export type SkeletonUpdateCallback = (skeleton: SkeletonData | null) => void;
@@ -28,7 +43,7 @@ export type SkeletonUpdateCallback = (skeleton: SkeletonData | null) => void;
  * Provides live skeleton data that can be consumed by any renderer
  */
 export class SkeletonProvider {
-  private poseLandmarker: any = null;
+  private holisticLandmarker: any = null;
   private callbacks: Set<SkeletonUpdateCallback> = new Set();
   private isProcessing = false;
   private isPaused = false;
@@ -91,16 +106,14 @@ export class SkeletonProvider {
   private readonly maxSamples = 300; // Track last 10 seconds at 30fps
 
   async initialize(modelPath: string): Promise<void> {
-    console.log('🔧 SkeletonProvider: Starting initialization...');
+    console.log('🔧 SkeletonProvider: Starting holistic initialization...');
     console.log('📁 Model path:', modelPath);
     
     try {
-      // Ensure we're running in a browser environment
       if (typeof window === 'undefined') {
         throw new Error('SkeletonProvider requires a browser environment');
       }
 
-      // Check for WebGL2 support
       const canvas = document.createElement('canvas');
       const gl = canvas.getContext('webgl2');
       if (!gl) {
@@ -108,16 +121,18 @@ export class SkeletonProvider {
       }
       console.log('✅ WebGL2 support confirmed');
 
-      // Import MediaPipe with better error handling
-      let vision, PoseLandmarker;
+      let vision, HolisticLandmarker;
       try {
         const mediapipeModule = await import('@mediapipe/tasks-vision');
-        PoseLandmarker = mediapipeModule.PoseLandmarker;
+        HolisticLandmarker = mediapipeModule.HolisticLandmarker;
         const FilesetResolver = mediapipeModule.FilesetResolver;
         
-        console.log('✅ MediaPipe modules imported successfully');
+        if (!HolisticLandmarker) {
+          throw new Error('HolisticLandmarker not available in tasks-vision build');
+        }
+
+        console.log('✅ MediaPipe holistic modules imported successfully');
         
-        // Create vision fileset resolver with proper WASM path
         vision = await FilesetResolver.forVisionTasks(
           "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
         );
@@ -127,54 +142,50 @@ export class SkeletonProvider {
         throw new Error(`MediaPipe import failed: ${importError instanceof Error ? importError.message : String(importError)}`);
       }
 
-      // Validate model path
       if (!modelPath || typeof modelPath !== 'string') {
         throw new Error('Invalid model path provided');
       }
 
-      // Create PoseLandmarker with robust configuration
-      try {
-        this.poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: modelPath,
-            delegate: 'GPU' // Try GPU first, will fallback to CPU if needed
-          },
-          runningMode: 'VIDEO',
-          numPoses: 1,
-          minPoseDetectionConfidence: 0.3, // Lower threshold for better detection
-          minPosePresenceConfidence: 0.3,
-          minTrackingConfidence: 0.3,
-          outputSegmentationMasks: false
-        });
-        console.log('✅ PoseLandmarker created with VIDEO mode');
-        console.log('⚙️ Configuration:', {
-          runningMode: 'VIDEO',
-          numPoses: 1,
-          minPoseDetectionConfidence: 0.3,
-          minPosePresenceConfidence: 0.3,
+      const createHolistic = async (delegate: 'GPU' | 'CPU') => {
+        const baseOptions = {
+          modelAssetPath: modelPath,
+          delegate
+        };
+
+        const options = {
+          baseOptions,
+          runningMode: 'VIDEO' as const,
+          numFaces: 1,
+          numHands: 2,
+          outputFaceBlendshapes: true,
+          outputPoseBlendshapes: true,
           minTrackingConfidence: 0.3
-        });
-      } catch (createError) {
-        console.error('❌ Failed to create PoseLandmarker:', createError);
-        // Try with CPU delegate as fallback
-        console.log('🔄 Retrying with CPU delegate...');
+        };
+
         try {
-          this.poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-            baseOptions: {
-              modelAssetPath: modelPath,
-              delegate: 'CPU'
-            },
-            runningMode: 'VIDEO',
-            numPoses: 1,
-            minPoseDetectionConfidence: 0.3,
-            minPosePresenceConfidence: 0.3,
-            minTrackingConfidence: 0.3,
-            outputSegmentationMasks: false
+          return await HolisticLandmarker.createFromOptions(vision, options);
+        } catch (err) {
+          // Retry with minimal options if advanced config not supported
+          console.warn('⚠️ Holistic creation with extended options failed, retrying with minimal config...', err);
+          return await HolisticLandmarker.createFromOptions(vision, {
+            baseOptions,
+            runningMode: 'VIDEO'
           });
-          console.log('✅ PoseLandmarker created with CPU delegate');
-        } catch (fallbackError) {
-          console.error('❌ CPU fallback also failed:', fallbackError);
-          throw new Error(`PoseLandmarker creation failed: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`);
+        }
+      };
+
+      try {
+        this.holisticLandmarker = await createHolistic('CPU');
+        console.log('✅ HolisticLandmarker created with CPU delegate');
+      } catch (cpuError) {
+        console.error('❌ Failed to create HolisticLandmarker with CPU:', cpuError);
+        console.log('🔄 Retrying with GPU delegate...');
+        try {
+          this.holisticLandmarker = await createHolistic('GPU');
+          console.log('✅ HolisticLandmarker created with GPU delegate');
+        } catch (gpuError) {
+          console.error('❌ GPU fallback also failed:', gpuError);
+          throw new Error(`HolisticLandmarker creation failed: ${gpuError instanceof Error ? gpuError.message : String(gpuError)}`);
         }
       }
 
@@ -204,8 +215,8 @@ export class SkeletonProvider {
       currentTime: video.currentTime
     });
     
-    if (!this.poseLandmarker) {
-      console.error('❌ PoseLandmarker not initialized');
+    if (!this.holisticLandmarker) {
+      console.error('❌ HolisticLandmarker not initialized');
       return;
     }
     
@@ -290,7 +301,7 @@ export class SkeletonProvider {
   }
 
   private async processVideoFrame(video: HTMLVideoElement): Promise<void> {
-    if (!this.isProcessing || !this.poseLandmarker || this.isPaused) return;
+    if (!this.isProcessing || !this.holisticLandmarker || this.isPaused) return;
 
     const currentTime = video.currentTime;
     if (currentTime !== this.lastFrameTime) {
@@ -300,7 +311,7 @@ export class SkeletonProvider {
         const timestamp = performance.now();
         //console.log('🔍 Processing video frame at timestamp:', timestamp);
         
-        const result = this.poseLandmarker.detectForVideo(video, timestamp);
+        const result = this.holisticLandmarker.detectForVideo(video, timestamp);
         // console.log('📊 Detection result:', {
         //   hasLandmarks: !!result.landmarks,
         //   landmarkCount: result.landmarks?.length || 0,
@@ -401,50 +412,59 @@ export class SkeletonProvider {
     }
   }
 
+  private normalizeLandmarks(landmarks?: any[]): NormalizedLandmark[] | undefined {
+    if (!landmarks || !Array.isArray(landmarks) || landmarks.length === 0) {
+      return undefined;
+    }
+
+    return landmarks.map((landmark: any) => ({
+      x: landmark.x ?? 0,
+      y: landmark.y ?? 0,
+      z: landmark.z ?? 0,
+      visibility: landmark.visibility ?? landmark.presence ?? landmark.score ?? 1,
+      presence: landmark.presence ?? landmark.visibility ?? landmark.score ?? 1
+    }));
+  }
+
   private convertResultToSkeleton(result: any): SkeletonData | null {
-    //console.log('🔄 Converting MediaPipe result to skeleton data');
-    
-    if (!result.landmarks || result.landmarks.length === 0) {
-      console.log('❌ No landmarks in result');
+    if (!result) {
+      console.log('❌ No holistic result available');
       return null;
     }
 
-    const landmarks = result.landmarks[0];
-    const worldLandmarks = result.worldLandmarks?.[0];
-
-    // console.log('📍 Landmarks found:', {
-    //   landmarkCount: landmarks.length,
-    //   hasWorldLandmarks: !!worldLandmarks,
-    //   worldLandmarkCount: worldLandmarks?.length || 0
-    // });
-
-    if (!landmarks || landmarks.length < 33) {
-      console.log('❌ Insufficient landmarks:', landmarks.length);
+    const poseLandmarks2D = this.normalizeLandmarks(result.poseLandmarks?.[0]);
+    if (!poseLandmarks2D || poseLandmarks2D.length < 33) {
+      console.log('❌ Insufficient pose landmarks detected');
       return null;
     }
 
-    const joints: SkeletonJoint[] = landmarks.map((landmark: any, index: number) => {
-      const worldLandmark = worldLandmarks?.[index];
+    const poseLandmarks3D = this.normalizeLandmarks(result.poseWorldLandmarks?.[0]);
+    const faceLandmarks = this.normalizeLandmarks(result.faceLandmarks?.[0]);
+    const leftHandLandmarks = this.normalizeLandmarks(result.leftHandLandmarks?.[0]);
+    const rightHandLandmarks = this.normalizeLandmarks(result.rightHandLandmarks?.[0]);
+
+    const joints: SkeletonJoint[] = poseLandmarks2D.map((landmark: NormalizedLandmark, index: number) => {
+      const worldLandmark = poseLandmarks3D?.[index];
       const connections = this.getConnectionsForJoint(index);
 
       return {
         id: index,
         name: SkeletonProvider.JOINT_NAMES[index] || `joint_${index}`,
         position: {
-          x: landmark.x,
-          y: landmark.y,
-          z: 0///landmark.z || 0
+          x: landmark.x ?? 0,
+          y: landmark.y ?? 0,
+          z: landmark.z ?? 0
         },
         worldPosition: worldLandmark ? {
           x: worldLandmark.x,
           y: worldLandmark.y,
-          z: 0//worldLandmark.z
+          z: worldLandmark.z ?? 0
         } : {
-          x: landmark.x,
-          y: landmark.y,
-          z: 0///landmark.z || 0
+          x: landmark.x ?? 0,
+          y: landmark.y ?? 0,
+          z: landmark.z ?? 0
         },
-        visibility: landmark.visibility || 1.0,
+        visibility: landmark.visibility ?? 1.0,
         connections
       };
     });
@@ -455,26 +475,20 @@ export class SkeletonProvider {
     // Calculate overall confidence based on visibility
     const avgVisibility = joints.reduce((sum, joint) => sum + joint.visibility, 0) / joints.length;
 
-    // console.log('✅ Skeleton conversion complete:', {
-    //   jointCount: joints.length,
-    //   avgVisibility: avgVisibility.toFixed(3),
-    //   visibleJoints: joints.filter(j => j.visibility > 0.5).length
-    // });
-
-    //const movementRange = this.getMovementRange();
-    // if (movementRange) {
-    //   console.log('📏 Movement range:', {
-    //     size: movementRange.size,
-    //     center: movementRange.center,
-    //     samples: this.boundsSampleCount
-    //   });
-    // }
+    const movementRange = this.getMovementRange();
 
     return {
       joints,
       timestamp: performance.now(),
       confidence: avgVisibility,
-      //movementRange: movementRange || undefined
+      movementRange: movementRange || undefined,
+      poseLandmarks2D,
+      poseLandmarks3D,
+      faceLandmarks,
+      leftHandLandmarks,
+      rightHandLandmarks,
+      poseBlendshapes: Array.isArray(result.poseBlendshapes) ? result.poseBlendshapes[0] : undefined,
+      faceBlendshapes: Array.isArray(result.faceBlendshapes) ? result.faceBlendshapes[0] : undefined
     };
   }
 
@@ -521,6 +535,6 @@ export class SkeletonProvider {
   dispose(): void {
     this.stopLiveDetection();
     this.callbacks.clear();
-    this.poseLandmarker = null;
+    this.holisticLandmarker = null;
   }
 }

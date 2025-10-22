@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { SkeletonProvider } from '../providers/SkeletonProvider';
-import { ThreeSkeletonRenderer } from '../renderers/ThreeSkeletonRenderer';
+import { KalidokitRenderer } from '../renderers/KalidokitRenderer';
 import { PhysicsSystem } from '../physics/PhysicsSystem';
 import { SkeletonPhysicsAdapter } from '../physics/SkeletonPhysicsAdapter';
 import { FocusManager, type PausableComponent } from '../utils/FocusManager';
@@ -42,7 +42,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
   const canvasContainerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const skeletonProviderRef = useRef<SkeletonProvider | null>(null);
-  const rendererRef = useRef<ThreeSkeletonRenderer | null>(null);
+  const rendererRef = useRef<KalidokitRenderer | null>(null);
   const physicsSystemRef = useRef<PhysicsSystem | null>(null);
   const skeletonPhysicsRef = useRef<SkeletonPhysicsAdapter | null>(null);
   const gameObjectsRef = useRef<Array<{ rigidBody: any; mesh: THREE.Mesh; active?: boolean }>>([]);
@@ -235,17 +235,13 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
 
       // Initialize renderer
       if (canvasRef.current) {
-        console.log('🎨 Setting up Three.js renderer...');
-        // Set up renderer with physics mode enabled
-        const renderer = new ThreeSkeletonRenderer(
-          canvasRef.current, {
-          showJointLabels: false,
-          physicsMode: true, // Enable physics mode visualization
-          physicsJointColor: '#ffaa00', // Orange color for physics joints
-          physicsJointSize: 0.08 // Large collision spheres
+        console.log('🎨 Setting up Kalidokit renderer...');
+        const renderer = new KalidokitRenderer(canvasRef.current, {
+          autoRotate: false
         });
         rendererRef.current = renderer;
-        console.log('✅ Three.js renderer created');
+        renderer.setVideoElement(videoRef.current);
+        console.log('✅ Kalidokit renderer created');
 
         // Init audio manager (will resume on first user gesture)
         audioRef.current = new AudioManager();
@@ -284,6 +280,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
         skeletonProvider.subscribe((skeletonData) => {
           // Always update renderer with latest skeleton. Physics system doesn't own skeleton.
           renderer.updateSkeleton(skeletonData);
+          skeletonPhysicsRef.current?.updateSkeleton(skeletonData);
           // Feed story recognizer if active
           if (storyModeRef.current) {
             storyModeRef.current.updateSkeleton(skeletonData);
@@ -407,6 +404,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
       console.log('🎥 Actual resolution:', `${settings.width}x${settings.height}@${settings.frameRate}fps`);
       
       video.srcObject = stream;
+      rendererRef.current?.setVideoElement(video);
       
       // Wait for video to be ready before playing
       await new Promise<void>((resolve, reject) => {
@@ -460,6 +458,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
             const stream = await navigator.mediaDevices.getUserMedia({ video: true });
             const video = videoRef.current;
             video.srcObject = stream;
+            rendererRef.current?.setVideoElement(video);
             await video.play();
             console.log('✅ Camera setup successful with fallback settings');
           } catch (fallbackError) {
@@ -565,6 +564,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
       });
 
       videoRef.current.srcObject = stream;
+      rendererRef.current?.setVideoElement(videoRef.current);
       await videoRef.current.play();
 
       // Start skeleton detection

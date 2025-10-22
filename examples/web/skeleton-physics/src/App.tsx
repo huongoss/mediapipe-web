@@ -2,8 +2,8 @@ import { PhysicsGameDemo } from './components/PhysicsGameDemo';
 import './App.css';
 
 function App() {
-  // Use the pose landmarker model from MediaPipe
-  const modelPath = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
+  // Use the holistic landmarker model from MediaPipe (latest float16 release)
+  const modelPath = "https://storage.googleapis.com/mediapipe-models/holistic_landmarker/holistic_landmarker/float16/latest/holistic_landmarker.task";
 
   return (
     <div className="App">
