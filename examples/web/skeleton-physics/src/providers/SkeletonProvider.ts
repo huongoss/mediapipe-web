@@ -54,6 +54,8 @@ export class SkeletonProvider {
   private procCtx: CanvasRenderingContext2D | null = null;
   private procW = 640; // target processing width (kept <= camera width)
   private procH = 360;
+  private detectIntervalMs = 1000 / 15; // default 15 FPS
+  private detectTimer: number | null = null;
 
   // Pose landmark connections (based on MediaPipe pose topology)
   private static readonly POSE_CONNECTIONS = [
@@ -133,7 +135,7 @@ export class SkeletonProvider {
       }
       console.log('✅ WebGL2 support confirmed');
 
-      let vision, HolisticLandmarker;
+  let vision, HolisticLandmarker;
       try {
         const mediapipeModule = await import('@mediapipe/tasks-vision');
         HolisticLandmarker = mediapipeModule.HolisticLandmarker;
@@ -187,18 +189,36 @@ export class SkeletonProvider {
         }
       };
 
+      // Allow delegate override via URL (?detDelegate=CPU|GPU)
+      let forcedDelegate: 'CPU' | 'GPU' | null = null;
       try {
-        // Prefer GPU for better performance
+        const p = new URLSearchParams(window.location.search);
+        const d = p.get('detDelegate');
+        if (d && (d.toUpperCase() === 'CPU' || d.toUpperCase() === 'GPU')) {
+          forcedDelegate = d.toUpperCase() as 'CPU' | 'GPU';
+        }
+      } catch {}
+
+      if (forcedDelegate === 'CPU') {
+        this.holisticLandmarker = await createHolistic('CPU');
+        console.log('✅ HolisticLandmarker created with CPU delegate (forced)');
+      } else if (forcedDelegate === 'GPU') {
         this.holisticLandmarker = await createHolistic('GPU');
-        console.log('✅ HolisticLandmarker created with GPU delegate');
-      } catch (gpuError) {
-        console.warn('⚠️ Failed to create HolisticLandmarker with GPU, falling back to CPU:', gpuError);
+        console.log('✅ HolisticLandmarker created with GPU delegate (forced)');
+      } else {
         try {
-          this.holisticLandmarker = await createHolistic('CPU');
-          console.log('✅ HolisticLandmarker created with CPU delegate');
-        } catch (cpuError) {
-          console.error('❌ CPU fallback also failed:', cpuError);
-          throw new Error(`HolisticLandmarker creation failed: ${cpuError instanceof Error ? cpuError.message : String(cpuError)}`);
+          // Prefer GPU; fallback to CPU if unavailable
+          this.holisticLandmarker = await createHolistic('GPU');
+          console.log('✅ HolisticLandmarker created with GPU delegate');
+        } catch (gpuError) {
+          console.warn('⚠️ Failed to create HolisticLandmarker with GPU, falling back to CPU:', gpuError);
+          try {
+            this.holisticLandmarker = await createHolistic('CPU');
+            console.log('✅ HolisticLandmarker created with CPU delegate');
+          } catch (cpuError) {
+            console.error('❌ CPU fallback also failed:', cpuError);
+            throw new Error(`HolisticLandmarker creation failed: ${cpuError instanceof Error ? cpuError.message : String(cpuError)}`);
+          }
         }
       }
 
@@ -238,7 +258,7 @@ export class SkeletonProvider {
       return;
     }
     
-    console.log('✅ Starting video frame processing...');
+  console.log('✅ Starting video frame processing...');
     // Prepare processing canvas sized from current video resolution
     const vw = Math.max(1, video.videoWidth || 640);
     const vh = Math.max(1, video.videoHeight || 480);
@@ -263,8 +283,23 @@ export class SkeletonProvider {
       (this.procCtx as any).imageSmoothingEnabled = false;
     }
     console.log(`🖼️ Detector input downscale set to ${this.procW}x${this.procH} (camera ${vw}x${vh})`);
+    // Determine detector FPS (lower FPS decouples load from render/physics). URL: ?detFps=15
+    try {
+      const p = new URLSearchParams(window.location.search);
+      const fps = parseInt(p.get('detFps') || '15', 10);
+      if (isFinite(fps) && fps > 0) this.detectIntervalMs = Math.max(5, Math.round(1000 / fps));
+    } catch {}
+
     this.isProcessing = true;
-    this.processVideoFrame(video);
+    const tick = () => {
+      if (!this.isProcessing) return;
+      try {
+        if (!this.isPaused) this.processVideoFrame(video);
+      } finally {
+        this.detectTimer = window.setTimeout(tick, this.detectIntervalMs);
+      }
+    };
+    tick();
   }
 
   /**
@@ -272,6 +307,10 @@ export class SkeletonProvider {
    */
   stopLiveDetection(): void {
     this.isProcessing = false;
+    if (this.detectTimer !== null) {
+      clearTimeout(this.detectTimer);
+      this.detectTimer = null;
+    }
   }
 
   /**
@@ -424,15 +463,7 @@ export class SkeletonProvider {
       }
     }
 
-    // Continue processing with error handling
-    if (this.isProcessing && !this.isPaused) {
-      try {
-        requestAnimationFrame(() => this.processVideoFrame(video));
-      } catch (error) {
-        console.error('❌ Failed to schedule next frame:', error);
-        this.isProcessing = false;
-      }
-    }
+    // Scheduling handled by startLiveDetection timer; no rAF here
   }
 
   private updateMovementBounds(joints: SkeletonJoint[]): void {

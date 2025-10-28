@@ -3,11 +3,22 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRM, VRMUtils } from '@pixiv/three-vrm';
 import * as Kalidokit from 'kalidokit';
-import { SkeletonData, SkeletonJoint, SkeletonProvider } from '../providers/SkeletonProvider';
+import { SkeletonData, SkeletonJoint } from '../providers/SkeletonProvider';
 import Perf from '../utils/Perf';
 
 type RiggedPose = ReturnType<typeof Kalidokit.Pose.solve>;
 type RiggedFace = ReturnType<typeof Kalidokit.Face.solve>;
+
+interface VRMBoneConnection {
+  from: string;
+  to: string;
+  fromId: number;
+  toId: number;
+}
+
+interface VRMSkeletonStructure {
+  connections: VRMBoneConnection[];
+}
 
 const DEFAULT_MODEL_URL = '/models/29e07830-2317-4b15-a044-135e73c7f840_Ashtra.vrm';
 
@@ -29,12 +40,10 @@ export class KalidokitRenderer {
   private resizeHandler: (() => void) | null = null;
   private targetGroupX = 0;
   private followXSmoothing = 0.2;
-  private lastSkeleton: SkeletonData | null = null;
   private videoElement: HTMLVideoElement | null = null;
   private avatarScale = 1.6;
   private skeletonLines: THREE.LineSegments | null = null;
   private skeletonLinePositions: Float32Array | null = null;
-  private readonly poseConnections = SkeletonProvider.getPoseConnections();
 
   constructor(container: HTMLElement | HTMLCanvasElement, options: KalidokitRendererOptions = {}) {
     this.scene = new THREE.Scene();
@@ -90,7 +99,6 @@ export class KalidokitRenderer {
 
   updateSkeleton(skeletonData: SkeletonData | null): void {
     const tUpdate = Perf.start('renderer:updateSkeleton');
-    this.lastSkeleton = skeletonData;
 
     if (!skeletonData || !this.vrm) {
       return;
@@ -170,35 +178,39 @@ export class KalidokitRenderer {
   }
 
   getBoneWorldSegments(): Array<{ fromId: number; toId: number; start: THREE.Vector3; end: THREE.Vector3 }> {
-    if (!this.lastSkeleton) return [];
+    if (!this.vrm) return [];
 
     const segments: Array<{ fromId: number; toId: number; start: THREE.Vector3; end: THREE.Vector3 }> = [];
-    const joints = this.lastSkeleton.joints;
-    const scale = this.skeletonGroup.scale.x;
-    const offset = this.skeletonGroup.position.clone();
+    
+    // Use VRM bone structure for perfect alignment, getting current animated positions
+    const vrmSkeleton = this.extractVRMSkeleton();
+    if (!vrmSkeleton) return [];
 
-    const toWorldVector = (joint: SkeletonJoint) => {
-      const vector = new THREE.Vector3(
-        joint.worldPosition.x,
-        -joint.worldPosition.y,
-        joint.worldPosition.z
-      );
-      vector.multiplyScalar(scale);
-      vector.add(offset);
-      return vector;
-    };
+    for (const connection of vrmSkeleton.connections) {
+      const startBone = this.getHumanoidBone(connection.from);
+      const endBone = this.getHumanoidBone(connection.to);
+      
+      if (!startBone || !endBone) continue;
 
-    for (const [fromId, toId] of this.poseConnections) {
-      const fromJoint = joints[fromId];
-      const toJoint = joints[toId];
-      if (!fromJoint || !toJoint) continue;
-      if (fromJoint.visibility < 0.5 || toJoint.visibility < 0.5) continue;
+      // Force matrix updates to get current animated positions
+      startBone.updateWorldMatrix(true, false);
+      endBone.updateWorldMatrix(true, false);
+
+      const start = new THREE.Vector3();
+      const end = new THREE.Vector3();
+      
+      startBone.getWorldPosition(start);
+      endBone.getWorldPosition(end);
+
+      // Clamp Z coordinates to stay near Z=0 for consistent collision with balls
+      start.z = Math.min(Math.max(start.z, -0.2), 0.2);
+      end.z = Math.min(Math.max(end.z, -0.2), 0.2);
 
       segments.push({
-        fromId,
-        toId,
-        start: toWorldVector(fromJoint),
-        end: toWorldVector(toJoint)
+        fromId: connection.fromId,
+        toId: connection.toId,
+        start,
+        end
       });
     }
 
@@ -207,6 +219,51 @@ export class KalidokitRenderer {
 
   getBoneRadius(): number {
     return 0.05 * this.skeletonGroup.scale.x;
+  }
+
+  private extractVRMSkeleton(): VRMSkeletonStructure | null {
+    if (!this.vrm) return null;
+
+    // Define VRM humanoid bone connections for main body structure
+    const connections: VRMBoneConnection[] = [
+      // Spine chain
+      { from: 'hips', to: 'spine', fromId: 0, toId: 1 },
+      { from: 'spine', to: 'chest', fromId: 1, toId: 2 },
+      { from: 'chest', to: 'upperChest', fromId: 2, toId: 3 },
+      { from: 'upperChest', to: 'neck', fromId: 3, toId: 4 },
+      { from: 'neck', to: 'head', fromId: 4, toId: 5 },
+
+      // Left arm
+      { from: 'upperChest', to: 'leftShoulder', fromId: 3, toId: 6 },
+      { from: 'leftShoulder', to: 'leftUpperArm', fromId: 6, toId: 7 },
+      { from: 'leftUpperArm', to: 'leftLowerArm', fromId: 7, toId: 8 },
+      { from: 'leftLowerArm', to: 'leftHand', fromId: 8, toId: 9 },
+
+      // Right arm
+      { from: 'upperChest', to: 'rightShoulder', fromId: 3, toId: 10 },
+      { from: 'rightShoulder', to: 'rightUpperArm', fromId: 10, toId: 11 },
+      { from: 'rightUpperArm', to: 'rightLowerArm', fromId: 11, toId: 12 },
+      { from: 'rightLowerArm', to: 'rightHand', fromId: 12, toId: 13 },
+
+      // Left leg
+      { from: 'hips', to: 'leftUpperLeg', fromId: 0, toId: 14 },
+      { from: 'leftUpperLeg', to: 'leftLowerLeg', fromId: 14, toId: 15 },
+      { from: 'leftLowerLeg', to: 'leftFoot', fromId: 15, toId: 16 },
+
+      // Right leg
+      { from: 'hips', to: 'rightUpperLeg', fromId: 0, toId: 17 },
+      { from: 'rightUpperLeg', to: 'rightLowerLeg', fromId: 17, toId: 18 },
+      { from: 'rightLowerLeg', to: 'rightFoot', fromId: 18, toId: 19 },
+    ];
+
+    // Filter connections to only include bones that exist in this VRM model
+    const validConnections = connections.filter(conn => {
+      const fromBone = this.getHumanoidBone(conn.from);
+      const toBone = this.getHumanoidBone(conn.to);
+      return fromBone && toBone;
+    });
+
+    return { connections: validConnections };
   }
 
   dispose(): void {
@@ -488,7 +545,9 @@ export class KalidokitRenderer {
 
   private createSkeletonLines(): void {
     const lineMaterial = new THREE.LineBasicMaterial({ color: 0x49c1ff, transparent: true, opacity: 0.6 });
-    const positionArray = new Float32Array(this.poseConnections.length * 2 * 3);
+    // Estimate max possible connections (will adjust based on actual VRM structure)
+    const maxConnections = 20;
+    const positionArray = new Float32Array(maxConnections * 2 * 3);
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positionArray, 3));
     // Start with nothing drawn; we'll increase drawRange based on valid segments per frame
@@ -500,43 +559,57 @@ export class KalidokitRenderer {
     this.skeletonLinePositions = positionArray;
   }
 
-  private updateSkeletonLines(skeletonData: SkeletonData | null): void {
+  private updateSkeletonLines(_skeletonData?: SkeletonData | null): void {
     if (!this.skeletonLines || !this.skeletonLinePositions) return;
 
-    if (!skeletonData) {
+    // Show skeleton lines based on VRM bone structure instead of MediaPipe data
+    if (!this.vrm) {
       this.skeletonLines.visible = false;
       return;
     }
 
-    const joints = skeletonData.joints;
-    const scale = this.skeletonGroup.scale.x;
-    const offset = this.skeletonGroup.position;
+    const vrmSkeleton = this.extractVRMSkeleton();
+    if (!vrmSkeleton) {
+      this.skeletonLines.visible = false;
+      return;
+    }
 
-    // Write only valid segments and adjust drawRange to avoid NaN values
+    // Write VRM bone positions to line segments
     let usedSegments = 0;
     let anyVisible = false;
-    for (let i = 0; i < this.poseConnections.length; i++) {
-      const from = this.poseConnections[i][0];
-      const to = this.poseConnections[i][1];
-      const a = joints[from];
-      const b = joints[to];
-      if (!a || !b || a.visibility < 0.45 || b.visibility < 0.45) continue;
 
-      const ax = a.worldPosition.x * scale + offset.x;
-      const ay = -a.worldPosition.y * scale + offset.y;
-      const az = a.worldPosition.z * scale + offset.z;
+    for (const connection of vrmSkeleton.connections) {
+      const fromBone = this.getHumanoidBone(connection.from);
+      const toBone = this.getHumanoidBone(connection.to);
+      
+      if (!fromBone || !toBone) continue;
 
-      const bx = b.worldPosition.x * scale + offset.x;
-      const by = -b.worldPosition.y * scale + offset.y;
-      const bz = b.worldPosition.z * scale + offset.z;
+      // Get world positions, then convert to skeletonGroup local space
+      fromBone.updateWorldMatrix(true, false);
+      toBone.updateWorldMatrix(true, false);
+
+      const fromWorld = new THREE.Vector3();
+      const toWorld = new THREE.Vector3();
+      fromBone.getWorldPosition(fromWorld);
+      toBone.getWorldPosition(toWorld);
+
+      // Clamp Z coordinates to stay near Z=0 for consistent collision
+      fromWorld.z = Math.min(Math.max(fromWorld.z, -0.2), 0.2);
+      toWorld.z = Math.min(Math.max(toWorld.z, -0.2), 0.2);
+
+      // Convert world positions to skeletonGroup local space
+      this.skeletonGroup.updateWorldMatrix(true, false);
+      const invMatrix = this.skeletonGroup.matrixWorld.clone().invert();
+      const fromLocal = fromWorld.clone().applyMatrix4(invMatrix);
+      const toLocal = toWorld.clone().applyMatrix4(invMatrix);
 
       const base = usedSegments * 6;
-      this.skeletonLinePositions![base + 0] = ax;
-      this.skeletonLinePositions![base + 1] = ay;
-      this.skeletonLinePositions![base + 2] = az;
-      this.skeletonLinePositions![base + 3] = bx;
-      this.skeletonLinePositions![base + 4] = by;
-      this.skeletonLinePositions![base + 5] = bz;
+      this.skeletonLinePositions![base + 0] = fromLocal.x;
+      this.skeletonLinePositions![base + 1] = fromLocal.y;
+      this.skeletonLinePositions![base + 2] = fromLocal.z;
+      this.skeletonLinePositions![base + 3] = toLocal.x;
+      this.skeletonLinePositions![base + 4] = toLocal.y;
+      this.skeletonLinePositions![base + 5] = toLocal.z;
       usedSegments++;
       anyVisible = true;
     }

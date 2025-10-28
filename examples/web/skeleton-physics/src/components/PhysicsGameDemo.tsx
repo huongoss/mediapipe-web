@@ -274,6 +274,10 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
           gravityScale: 0.5
         });
         skeletonPhysicsRef.current = skeletonPhysics;
+        
+        // Set renderer reference for VRM bone segments
+        skeletonPhysics.setRenderer(renderer);
+        
         console.log('✅ Physics system and skeleton adapter initialized');
 
         console.log('🔗 Setting up skeleton update subscription...');
@@ -807,7 +811,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
 
         // Use pool for updates
         const activeBalls = ballPoolRef.current;
-  if (!isStoryModeRef.current && isRoundActiveRef.current && activeBalls.length > 0) {
+        if (activeBalls.length > 0) {
           const tBalls = Perf.start('game:ballsUpdate');
           activeBalls.forEach(({ rigidBody, mesh, active }, ballIndex) => {
             if (!active) return;
@@ -815,13 +819,14 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
               const pos = rigidBody.translation();
               const rot = rigidBody.rotation();
               const velocity = rigidBody.linvel();
-              
-              // Update mesh position and rotation
+
+              // Always update visual position/rotation so balls "drop" even outside rounds
               mesh.position.set(pos.x, pos.y, pos.z);
               mesh.quaternion.set(rot.x, rot.y, rot.z, rot.w);
 
-              // Check for collisions with skeleton bones (segments) when tracking is active
-              if (isDetectionActive && boneSegments.length > 0) {
+              // Only run gameplay interactions during normal mode + active round
+              const gameplayOn = !isStoryModeRef.current && isRoundActiveRef.current;
+              if (gameplayOn && isDetectionActive && boneSegments.length > 0) {
                 const ballPosition = new THREE.Vector3(pos.x, pos.y, pos.z);
                 const ballRadius = BALL_RADIUS;
                 const combinedCheck = (segStart: THREE.Vector3, segEnd: THREE.Vector3, segR: number) => {
@@ -929,13 +934,11 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
                   break;
                 }
               }
-
-              // Reuse ball by respawning when out of bounds
-              if (pos.y < -2) {
+              // Reuse ball by respawning when out of bounds (only during active rounds)
+              if (gameplayOn && pos.y < -2) {
                 const { position: newPosition, velocity: newVelocity } = generateBallSpawn();
                 rigidBody.setTranslation({ x: newPosition.x, y: newPosition.y, z: 0 }, true);
                 rigidBody.setLinvel(newVelocity, true);
-                // Reinforce visibility/active flags in case they drifted
                 mesh.visible = true;
                 (gameObjectsRef.current[ballIndex] as any).active = true;
               }
@@ -945,13 +948,15 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
           });
           Perf.end('game:ballsUpdate', tBalls);
 
-          // Safety: if no active balls visible for a bit, force-spawn one
-          const nowMs = performance.now();
-          if (nowMs - lastSafetyCheckRef.current > 2000) {
-            lastSafetyCheckRef.current = nowMs;
-            const activeVisible = ballPoolRef.current.some(b => b.active && b.mesh.visible);
-            if (!activeVisible && !isStoryModeRef.current) {
-              spawnOneFromPool();
+          // Safety: if no active balls visible for a bit, force-spawn one (only during rounds)
+          if (!isStoryModeRef.current && isRoundActiveRef.current) {
+            const nowMs = performance.now();
+            if (nowMs - lastSafetyCheckRef.current > 2000) {
+              lastSafetyCheckRef.current = nowMs;
+              const activeVisible = ballPoolRef.current.some(b => b.active && b.mesh.visible);
+              if (!activeVisible) {
+                spawnOneFromPool();
+              }
             }
           }
         }

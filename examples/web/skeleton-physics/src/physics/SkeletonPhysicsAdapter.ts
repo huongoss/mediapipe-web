@@ -18,12 +18,20 @@ export interface SkeletonPhysicsOptions {
 export class SkeletonPhysicsAdapter {
   private physicsSystem: PhysicsSystem;
   private skeletonJoints: Map<number, PhysicsObject> = new Map();
+  private rendererRef: any = null; // Reference to renderer for getting VRM bone segments
   // private lastSkeletonData: SkeletonData | null = null;
   // private options: Required<SkeletonPhysicsOptions>;
 
   constructor(physicsSystem: PhysicsSystem, _options: SkeletonPhysicsOptions = {}) {
     this.physicsSystem = physicsSystem;
     // Options could be used to adjust physics parameters in future
+  }
+
+  /**
+   * Set renderer reference to get VRM bone segments
+   */
+  setRenderer(renderer: any): void {
+    this.rendererRef = renderer;
   }
 
   /**
@@ -121,25 +129,49 @@ export class SkeletonPhysicsAdapter {
     return this.physicsSystem;
   }
 
-  private updateJointPositions(skeletonData: SkeletonData): void {
-    skeletonData.joints.forEach(joint => {
-      if (joint.visibility < 0.5) return;
+  private updateJointPositions(_skeletonData: SkeletonData): void {
+    // Use VRM bone segments from renderer instead of MediaPipe joints for consistency
+    if (!this.rendererRef?.getBoneWorldSegments) {
+      console.warn('⚠️ Renderer not set or missing getBoneWorldSegments method');
+      return;
+    }
 
-      const id = `skeleton_joint_${joint.id}`;
-      const pos = joint.worldPosition;
+    const boneSegments = this.rendererRef.getBoneWorldSegments();
+    const boneRadius = this.rendererRef.getBoneRadius?.() ?? 0.05;
+
+    // Clear existing joints
+    this.clearSkeleton();
+
+    // Create physics bodies for bone segments (as spheres at segment centers)
+    boneSegments.forEach((segment: any) => {
+      const center = new THREE.Vector3().addVectors(segment.start, segment.end).multiplyScalar(0.5);
       
-      this.physicsSystem.setPosition(id, {
-        x: -pos.x, // Mirror camera
-        y: -pos.y, // Flip Y coordinate
-        z: 0//pos.z
-      });
+      // Ensure skeleton collision is near Z=0 to match ball spawns
+      center.z = 0;
+      
+      const id = `skeleton_bone_${segment.fromId}_${segment.toId}`;
+      
+      // Create kinematic sphere at bone center (mass = 0 makes it kinematic-like)
+      const physicsObject = this.physicsSystem.createBall(
+        id,
+        { x: center.x, y: center.y, z: center.z },
+        boneRadius,
+        0 // kinematic (mass = 0)
+      );
+
+      if (physicsObject) {
+        // Use as-is - mass 0 should make it behave kinematically
+        this.skeletonJoints.set(segment.fromId * 1000 + segment.toId, physicsObject);
+      }
     });
   }
 
   private clearSkeleton(): void {
     // Remove all skeleton joints from physics system
-    this.skeletonJoints.forEach((_, jointId) => {
-      const id = `skeleton_joint_${jointId}`;
+    this.skeletonJoints.forEach((_, jointKey) => {
+      const fromId = Math.floor(jointKey / 1000);
+      const toId = jointKey % 1000;
+      const id = `skeleton_bone_${fromId}_${toId}`;
       this.physicsSystem.removeObject(id);
     });
     this.skeletonJoints.clear();
