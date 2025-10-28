@@ -20,6 +20,7 @@ import { TrailParticles } from '../game/TrailParticles.ts';
 import { StoryMode } from '../story/StoryMode';
 import { StoryHUD } from '../ui/StoryHUD';
 import { StoryEnvironment } from '../story/StoryEnvironment';
+import Perf from '../utils/Perf';
 import { StoryGuideOverlay } from '../ui/StoryGuideOverlay';
 
 // Pool and ball constants
@@ -329,44 +330,47 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
       const videoDevices = devices.filter(device => device.kind === 'videoinput');
       console.log('📷 Available video devices:', videoDevices.map(d => ({ label: d.label, deviceId: d.deviceId })));
 
-      // Try to get the maximum resolution and field of view
-      // Start with high-end constraints and fall back if needed
+      // Prefer modest resolutions to keep detector fast; allow URL ?camW= value
+      const desiredW = (() => {
+        try {
+          const p = new URLSearchParams(window.location.search);
+          const w = parseInt(p.get('camW') || '1280', 10);
+          return isFinite(w) && w > 0 ? Math.min(1920, Math.max(320, w)) : 1280;
+        } catch { return 1280; }
+      })();
+      const desiredH = Math.round(desiredW * 9/16);
       const constraints = [
-        // Ultra-wide 4K (if available)
+        // 720p default (or URL override), 30fps
         {
           video: {
-            width: { ideal: 3840, min: 1920 },
-          height: { ideal: 2160, min: 1080 },
-            frameRate: { ideal: 30, min: 15 },
-            facingMode: 'user',
-            aspectRatio: { ideal: 16/9 }
-          }
-        },
-        // High resolution 1080p
-        {
-          video: {
-            width: { ideal: 1920, min: 1280 },
-            height: { ideal: 1080, min: 720 },
-            frameRate: { ideal: 60, min: 30 },
-            facingMode: 'user',
-            aspectRatio: { ideal: 16/9 }
-          }
-        },
-        // Standard HD with wider field of view preference
-        {
-          video: {
-            width: { ideal: 1280, min: 960 },
-            height: { ideal: 720, min: 540 },
+            width: { ideal: desiredW, max: desiredW, min: Math.min(640, desiredW) },
+            height: { ideal: desiredH, max: desiredH, min: Math.min(360, desiredH) },
             frameRate: { ideal: 30, min: 24 },
+            facingMode: 'user',
+            aspectRatio: { ideal: 16/9 }
+          }
+        },
+        // 960x540 fallback
+        {
+          video: {
+            width: { ideal: 960, max: 1280, min: 640 },
+            height: { ideal: 540, max: 720, min: 360 },
+            frameRate: { ideal: 30, min: 24 },
+            facingMode: 'user',
+            aspectRatio: { ideal: 16/9 }
+          }
+        },
+        // 640x360 fallback
+        {
+          video: {
+            width: { ideal: 640 },
+            height: { ideal: 360 },
+            frameRate: { ideal: 30, min: 15 },
             facingMode: 'user'
           }
         },
-        // Fallback to any available camera
-        {
-          video: {
-            facingMode: 'user'
-          }
-        }
+        // Any camera
+        { video: { facingMode: 'user' } }
       ];
 
       let stream: MediaStream | null = null;
@@ -744,12 +748,15 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
       try {
         // Step physics simulation once per frame
         if (skeletonPhysicsRef.current) {
+          const tPhys = Perf.start('physics:step');
           skeletonPhysicsRef.current.step();
+          Perf.end('physics:step', tPhys);
         }
 
         // Update active collision effects
         if (rendererRef.current) {
           const fxList = collisionEffectsRef.current;
+          const tFx = Perf.start('effects:update');
           for (let i = fxList.length - 1; i >= 0; i--) {
             const fx = fxList[i];
             fx.update(deltaSeconds);
@@ -758,10 +765,15 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
               fxList.splice(i, 1);
             }
           }
+          Perf.end('effects:update', tFx);
         }
 
         // Update particle trails
-        trailParticlesRef.current?.update(deltaSeconds);
+        {
+          const tParticles = Perf.start('particles:update');
+          trailParticlesRef.current?.update(deltaSeconds);
+          Perf.end('particles:update', tParticles);
+        }
 
         // Compute root (skeleton group) lateral velocity so bone speeds are relative to body motion
         const rootGroup = rendererRef.current?.getSkeletonGroup?.();
@@ -796,6 +808,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
         // Use pool for updates
         const activeBalls = ballPoolRef.current;
   if (!isStoryModeRef.current && isRoundActiveRef.current && activeBalls.length > 0) {
+          const tBalls = Perf.start('game:ballsUpdate');
           activeBalls.forEach(({ rigidBody, mesh, active }, ballIndex) => {
             if (!active) return;
             try {
@@ -930,6 +943,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
               console.error(`❌ Error updating ball ${ballIndex}:`, error);
             }
           });
+          Perf.end('game:ballsUpdate', tBalls);
 
           // Safety: if no active balls visible for a bit, force-spawn one
           const nowMs = performance.now();
@@ -954,6 +968,7 @@ export const PhysicsGameDemo: React.FC<PhysicsGameDemoProps> = ({ modelPath }) =
           }
         }
 
+        Perf.frameTick('game');
         animationId = requestAnimationFrame(animate);
       } catch (error) {
         console.error('❌ Animation loop error:', error);

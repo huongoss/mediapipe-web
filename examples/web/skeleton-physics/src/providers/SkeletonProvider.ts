@@ -48,6 +48,12 @@ export class SkeletonProvider {
   private isProcessing = false;
   private isPaused = false;
   private lastFrameTime = 0;
+  private perf = null as any;
+  // Downscale surface for faster detection regardless of camera resolution
+  private procCanvas: HTMLCanvasElement | null = null;
+  private procCtx: CanvasRenderingContext2D | null = null;
+  private procW = 640; // target processing width (kept <= camera width)
+  private procH = 360;
 
   // Pose landmark connections (based on MediaPipe pose topology)
   private static readonly POSE_CONNECTIONS = [
@@ -114,6 +120,12 @@ export class SkeletonProvider {
         throw new Error('SkeletonProvider requires a browser environment');
       }
 
+      // Lazy import Perf to avoid any circular deps during SSR
+      try {
+        const { Perf } = await import('../utils/Perf');
+        this.perf = Perf;
+      } catch {}
+
       const canvas = document.createElement('canvas');
       const gl = canvas.getContext('webgl2');
       if (!gl) {
@@ -155,10 +167,11 @@ export class SkeletonProvider {
         const options = {
           baseOptions,
           runningMode: 'VIDEO' as const,
-          numFaces: 1,
-          numHands: 2,
-          outputFaceBlendshapes: true,
-          outputPoseBlendshapes: true,
+          // Only need body pose → disable face/hands and their blendshapes for lower compute
+          numFaces: 0,
+          numHands: 0,
+          outputFaceBlendshapes: false,
+          outputPoseBlendshapes: false,
           minTrackingConfidence: 0.3
         };
 
@@ -175,17 +188,17 @@ export class SkeletonProvider {
       };
 
       try {
-        this.holisticLandmarker = await createHolistic('CPU');
-        console.log('✅ HolisticLandmarker created with CPU delegate');
-      } catch (cpuError) {
-        console.error('❌ Failed to create HolisticLandmarker with CPU:', cpuError);
-        console.log('🔄 Retrying with GPU delegate...');
+        // Prefer GPU for better performance
+        this.holisticLandmarker = await createHolistic('GPU');
+        console.log('✅ HolisticLandmarker created with GPU delegate');
+      } catch (gpuError) {
+        console.warn('⚠️ Failed to create HolisticLandmarker with GPU, falling back to CPU:', gpuError);
         try {
-          this.holisticLandmarker = await createHolistic('GPU');
-          console.log('✅ HolisticLandmarker created with GPU delegate');
-        } catch (gpuError) {
-          console.error('❌ GPU fallback also failed:', gpuError);
-          throw new Error(`HolisticLandmarker creation failed: ${gpuError instanceof Error ? gpuError.message : String(gpuError)}`);
+          this.holisticLandmarker = await createHolistic('CPU');
+          console.log('✅ HolisticLandmarker created with CPU delegate');
+        } catch (cpuError) {
+          console.error('❌ CPU fallback also failed:', cpuError);
+          throw new Error(`HolisticLandmarker creation failed: ${cpuError instanceof Error ? cpuError.message : String(cpuError)}`);
         }
       }
 
@@ -226,6 +239,30 @@ export class SkeletonProvider {
     }
     
     console.log('✅ Starting video frame processing...');
+    // Prepare processing canvas sized from current video resolution
+    const vw = Math.max(1, video.videoWidth || 640);
+    const vh = Math.max(1, video.videoHeight || 480);
+    const maxW = (() => {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const w = parseInt(params.get('procW') || '640', 10);
+        return isFinite(w) && w > 0 ? Math.min(w, vw) : Math.min(640, vw);
+      } catch {
+        return Math.min(640, vw);
+      }
+    })();
+    const scale = Math.min(1, maxW / vw);
+    this.procW = Math.max(1, Math.round(vw * scale));
+    this.procH = Math.max(1, Math.round(vh * scale));
+    if (!this.procCanvas) this.procCanvas = document.createElement('canvas');
+    this.procCanvas.width = this.procW;
+    this.procCanvas.height = this.procH;
+    this.procCtx = this.procCanvas.getContext('2d', { willReadFrequently: false }) as CanvasRenderingContext2D | null;
+    if (this.procCtx) {
+      // Disable smoothing for speed; model doesn't need pretty pixels
+      (this.procCtx as any).imageSmoothingEnabled = false;
+    }
+    console.log(`🖼️ Detector input downscale set to ${this.procW}x${this.procH} (camera ${vw}x${vh})`);
     this.isProcessing = true;
     this.processVideoFrame(video);
   }
@@ -308,10 +345,25 @@ export class SkeletonProvider {
       this.lastFrameTime = currentTime;
 
       try {
+        const frameStart = this.perf?.start?.('detector:frame');
         const timestamp = performance.now();
         //console.log('🔍 Processing video frame at timestamp:', timestamp);
         
-        const result = this.holisticLandmarker.detectForVideo(video, timestamp);
+        // Draw into a smaller canvas to cut GPU/CPU upload and resize costs
+        let sourceForDetect: HTMLCanvasElement | HTMLVideoElement = video;
+        if (this.procCanvas && this.procCtx) {
+          const tDown = this.perf?.start?.('detector:downscale');
+          try {
+            this.procCtx.drawImage(video, 0, 0, this.procW, this.procH);
+            sourceForDetect = this.procCanvas;
+          } finally {
+            this.perf?.end?.('detector:downscale', tDown);
+          }
+        }
+
+        const tDetect = this.perf?.start?.('detector:detect');
+        const result = this.holisticLandmarker.detectForVideo(sourceForDetect, timestamp);
+        this.perf?.end?.('detector:detect', tDetect);
         // console.log('📊 Detection result:', {
         //   hasLandmarks: !!result.landmarks,
         //   landmarkCount: result.landmarks?.length || 0,
@@ -319,7 +371,9 @@ export class SkeletonProvider {
         //   worldLandmarkCount: result.worldLandmarks?.length || 0
         // });
         
+        const tConvert = this.perf?.start?.('detector:convert');
         const skeleton = this.convertResultToSkeleton(result);
+        this.perf?.end?.('detector:convert', tConvert);
         
         // if (skeleton) {
         //   console.log('💀 Skeleton created:', {
@@ -347,6 +401,7 @@ export class SkeletonProvider {
         if (Math.random() < 0.1) { // Reduce log spam
           //console.log(`📢 Notifying ${this.callbacks.size} subscribers`);
         }
+        const tNotify = this.perf?.start?.('detector:notify');
         this.callbacks.forEach(callback => {
           try {
             callback(skeleton);
@@ -354,6 +409,9 @@ export class SkeletonProvider {
             console.error('❌ Subscriber callback failed:', callbackError);
           }
         });
+        this.perf?.end?.('detector:notify', tNotify);
+        this.perf?.end?.('detector:frame', frameStart);
+        this.perf?.frameTick?.('detector');
       } catch (error) {
         console.error('❌ Video frame processing failed:', error);
         this.callbacks.forEach(callback => {

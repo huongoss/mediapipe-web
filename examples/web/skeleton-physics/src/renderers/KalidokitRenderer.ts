@@ -4,6 +4,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRM, VRMUtils } from '@pixiv/three-vrm';
 import * as Kalidokit from 'kalidokit';
 import { SkeletonData, SkeletonJoint, SkeletonProvider } from '../providers/SkeletonProvider';
+import Perf from '../utils/Perf';
 
 type RiggedPose = ReturnType<typeof Kalidokit.Pose.solve>;
 type RiggedFace = ReturnType<typeof Kalidokit.Face.solve>;
@@ -55,7 +56,15 @@ export class KalidokitRenderer {
       antialias: true,
       alpha: false
     });
-    this.renderer.setPixelRatio(window.devicePixelRatio);
+    const pxRatio = (() => {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const cap = parseFloat(params.get('pr') || '1.5');
+        const limit = (isFinite(cap) && cap > 0) ? cap : 1.5;
+        return Math.min(window.devicePixelRatio, limit);
+      } catch { return Math.min(window.devicePixelRatio, 1.5); }
+    })();
+    this.renderer.setPixelRatio(pxRatio);
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
@@ -80,37 +89,53 @@ export class KalidokitRenderer {
   }
 
   updateSkeleton(skeletonData: SkeletonData | null): void {
+    const tUpdate = Perf.start('renderer:updateSkeleton');
     this.lastSkeleton = skeletonData;
 
     if (!skeletonData || !this.vrm) {
       return;
     }
 
-    this.updateGroupOffsetXFromImageSpace(skeletonData.joints);
+  const tOffset = Perf.start('renderer:updateOffset');
+  this.updateGroupOffsetXFromImageSpace(skeletonData.joints);
+  Perf.end('renderer:updateOffset', tOffset);
 
     const poseLandmarks2D = skeletonData.poseLandmarks2D;
     const poseLandmarks3D = skeletonData.poseLandmarks3D;
 
     let riggedPose: RiggedPose | null = null;
     if (poseLandmarks3D && poseLandmarks3D.length > 0 && poseLandmarks2D && poseLandmarks2D.length > 0) {
+      const tPose = Perf.start('kalidokit:poseSolve');
       riggedPose = Kalidokit.Pose.solve(poseLandmarks3D as any, poseLandmarks2D as any, {
         runtime: 'mediapipe',
         enableLegs: true,
         video: this.videoElement ?? undefined
       });
+      Perf.end('kalidokit:poseSolve', tPose);
+      const tApplyPose = Perf.start('vrm:applyPose');
       this.applyPose(riggedPose);
+      Perf.end('vrm:applyPose', tApplyPose);
     }
 
     let riggedFace: RiggedFace | null = null;
     if (skeletonData.faceLandmarks && skeletonData.faceLandmarks.length > 0) {
-      riggedFace = Kalidokit.Face.solve(skeletonData.faceLandmarks as any, {
-        runtime: 'mediapipe',
-        video: this.videoElement ?? undefined
-      });
+      // const tFace = Perf.start('kalidokit:faceSolve');
+      // riggedFace = Kalidokit.Face.solve(skeletonData.faceLandmarks as any, {
+      //   runtime: 'mediapipe',
+      //   video: this.videoElement ?? undefined
+      // });
+      // Perf.end('kalidokit:faceSolve', tFace);
     }
 
+    const tHead = Perf.start('vrm:applyHead');
     this.applyHead(riggedFace, riggedPose);
+    Perf.end('vrm:applyHead', tHead);
+
+    const tLines = Perf.start('renderer:skeletonLines');
     this.updateSkeletonLines(skeletonData);
+    Perf.end('renderer:skeletonLines', tLines);
+
+    Perf.end('renderer:updateSkeleton', tUpdate);
   }
 
   pause(): void {
@@ -219,10 +244,15 @@ export class KalidokitRenderer {
 
     const delta = this.clock.getDelta();
     if (this.vrm) {
+      const tVrm = Perf.start('vrm:update');
       this.vrm.update(delta);
+      Perf.end('vrm:update', tVrm);
     }
 
+    const tRender = Perf.start('three:render');
     this.renderer.render(this.scene, this.camera);
+    Perf.end('three:render', tRender);
+    Perf.frameTick('renderer');
     this.controls?.update();
   }
 
@@ -461,6 +491,8 @@ export class KalidokitRenderer {
     const positionArray = new Float32Array(this.poseConnections.length * 2 * 3);
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positionArray, 3));
+    // Start with nothing drawn; we'll increase drawRange based on valid segments per frame
+    geometry.setDrawRange(0, 0);
 
     this.skeletonLines = new THREE.LineSegments(geometry, lineMaterial);
     this.skeletonLines.visible = false;
@@ -480,20 +512,15 @@ export class KalidokitRenderer {
     const scale = this.skeletonGroup.scale.x;
     const offset = this.skeletonGroup.position;
 
-    let idx = 0;
+    // Write only valid segments and adjust drawRange to avoid NaN values
+    let usedSegments = 0;
     let anyVisible = false;
-    this.poseConnections.forEach(([from, to]) => {
+    for (let i = 0; i < this.poseConnections.length; i++) {
+      const from = this.poseConnections[i][0];
+      const to = this.poseConnections[i][1];
       const a = joints[from];
       const b = joints[to];
-      if (!a || !b || a.visibility < 0.45 || b.visibility < 0.45) {
-        this.skeletonLinePositions![idx++] = Number.NaN;
-        this.skeletonLinePositions![idx++] = Number.NaN;
-        this.skeletonLinePositions![idx++] = Number.NaN;
-        this.skeletonLinePositions![idx++] = Number.NaN;
-        this.skeletonLinePositions![idx++] = Number.NaN;
-        this.skeletonLinePositions![idx++] = Number.NaN;
-        return;
-      }
+      if (!a || !b || a.visibility < 0.45 || b.visibility < 0.45) continue;
 
       const ax = a.worldPosition.x * scale + offset.x;
       const ay = -a.worldPosition.y * scale + offset.y;
@@ -503,15 +530,19 @@ export class KalidokitRenderer {
       const by = -b.worldPosition.y * scale + offset.y;
       const bz = b.worldPosition.z * scale + offset.z;
 
-      this.skeletonLinePositions![idx++] = ax;
-      this.skeletonLinePositions![idx++] = ay;
-      this.skeletonLinePositions![idx++] = az;
-      this.skeletonLinePositions![idx++] = bx;
-      this.skeletonLinePositions![idx++] = by;
-      this.skeletonLinePositions![idx++] = bz;
+      const base = usedSegments * 6;
+      this.skeletonLinePositions![base + 0] = ax;
+      this.skeletonLinePositions![base + 1] = ay;
+      this.skeletonLinePositions![base + 2] = az;
+      this.skeletonLinePositions![base + 3] = bx;
+      this.skeletonLinePositions![base + 4] = by;
+      this.skeletonLinePositions![base + 5] = bz;
+      usedSegments++;
       anyVisible = true;
-    });
+    }
 
+    // Update draw range (2 vertices per segment)
+    this.skeletonLines.geometry.setDrawRange(0, usedSegments * 2);
     const positionAttr = this.skeletonLines.geometry.getAttribute('position');
     positionAttr.needsUpdate = true;
     this.skeletonLines.visible = anyVisible;
